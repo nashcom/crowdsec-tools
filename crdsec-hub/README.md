@@ -77,27 +77,27 @@ cp env.example .env       # optional, only if you want non-default settings
 
 Kept in sync with `crdsec-hub.sh help` - run that directly if this drifts.
 
-| Command                     | Description                                                                      |
-|-----------------------------|----------------------------------------------------------------------------------|
-| *(none)*                    | Show status                                                                      |
-| `help`                      | Show this help                                                                   |
-| `up`                        | Start the hub container (docker compose up -d)                                   |
-| `down`                      | Stop the hub container (keeps data/config volumes)                               |
-| `shell`                     | Open a shell inside the running container                                        |
-| `status`                    | Show hub status                                                                  |
-| `alerts`                    | List CrowdSec alerts                                                             |
-| `decisions`                 | List active CrowdSec decisions                                                   |
-| `metrics`                   | Show hub CrowdSec metrics                                                        |
-| `ban <IP> [duration]`       | Add a CrowdSec decision (hub-wide, all agents pick it up)                        |
-| `unban <IP>`                | Delete CrowdSec decisions for an IP                                              |
-| `register <name>`           | Register both machine + bouncer, print a ready-to-paste "crdsectl register" line |
-| `addmachine <name>`         | Register just a remote agent machine, print its credentials                      |
-| `machines`                  | List registered machines                                                         |
-| `addbouncer <name>`         | Register just a remote bouncer, print its API key                                |
-| `bouncers`                  | List registered bouncers                                                         |
-| `otlp <url> [--insecure]`   | Configure and apply the OTLP notification endpoint                               |
-| `testnotif [name]`          | Send a test alert through a notification plugin (default: `http_default`)        |
-| `version`                   | Show version information                                                         |
+| Command                       | Description                                                                                                                                 |
+|-------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------|
+| *(none)*                      | Show status                                                                                                                                 |
+| `help`                        | Show this help                                                                                                                              |
+| `up`                          | Start the hub container (docker compose up -d)                                                                                              |
+| `down`                        | Stop the hub container (keeps data/config volumes)                                                                                          |
+| `shell`                       | Open a shell inside the running container                                                                                                   |
+| `status`                      | Show hub status                                                                                                                             |
+| `alerts`                      | List CrowdSec alerts                                                                                                                        |
+| `decisions`                   | List active CrowdSec decisions                                                                                                              |
+| `metrics`                     | Show hub CrowdSec metrics                                                                                                                   |
+| `ban <IP> [duration]`         | Add a CrowdSec decision (hub-wide, all agents pick it up)                                                                                   |
+| `unban <IP>`                  | Delete CrowdSec decisions for an IP                                                                                                         |
+| `register <name> [--force]`   | Register both machine + bouncer, print a ready-to-paste "crdsectl register" line - `--force` clears any existing entry with that name first |
+| `addmachine <name> [--force]` | Register just a remote agent machine, print its credentials                                                                                 |
+| `machines`                    | List registered machines                                                                                                                    |
+| `addbouncer <name> [--force]` | Register just a remote bouncer, print its API key                                                                                           |
+| `bouncers`                    | List registered bouncers                                                                                                                    |
+| `otlp <url> [--insecure]`     | Configure and apply the OTLP notification endpoint                                                                                          |
+| `testnotif [name]`            | Send a test alert through a notification plugin (default: `http_default`)                                                                   |
+| `version`                     | Show version information                                                                                                                    |
 
 See the [root README](../README.md#hub-registration) for the registration flow diagram and an end-to-end example -
 `addmachine` (user/password registration) and `addbouncer` (key registration) serve different purposes, explained

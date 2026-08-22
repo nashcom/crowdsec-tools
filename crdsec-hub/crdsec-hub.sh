@@ -301,6 +301,21 @@ unban_ip()
 add_machine()
 {
   local name="$1"
+  shift
+
+  local force="no"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --force|-f)
+        force="yes"
+        ;;
+      *)
+        log_err "Unknown option: '$1'"
+        return 1
+        ;;
+    esac
+    shift
+  done
 
   if [ -z "$name" ]; then
     log_err "No machine name specified."
@@ -308,6 +323,14 @@ add_machine()
   fi
 
   require_running_container || return 1
+
+  # Deleting a name that doesn't exist errors - ignored on purpose, this
+  # is a "clear the way" pre-step, not something that itself needs to
+  # succeed. Without --force, a name collision surfaces as cscli's own
+  # "already exists" error below, same as always.
+  if [ "$force" = "yes" ]; then
+    dexec cscli machines delete "$name" >/dev/null 2>&1
+  fi
 
   echo
   echo "Registering machine '${name}'. Copy the printed credentials into that"
@@ -335,6 +358,21 @@ list_machines()
 add_bouncer()
 {
   local name="$1"
+  shift
+
+  local force="no"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --force|-f)
+        force="yes"
+        ;;
+      *)
+        log_err "Unknown option: '$1'"
+        return 1
+        ;;
+    esac
+    shift
+  done
 
   if [ -z "$name" ]; then
     log_err "No bouncer name specified."
@@ -342,6 +380,10 @@ add_bouncer()
   fi
 
   require_running_container || return 1
+
+  if [ "$force" = "yes" ]; then
+    dexec cscli bouncers delete "$name" >/dev/null 2>&1
+  fi
 
   echo
   echo "Registering bouncer '${name}'. The printed key is shown once - copy it"
@@ -369,6 +411,21 @@ list_bouncers()
 register_machine()
 {
   local name="$1"
+  shift
+
+  local force="no"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --force|-f)
+        force="yes"
+        ;;
+      *)
+        log_err "Unknown option: '$1'"
+        return 1
+        ;;
+    esac
+    shift
+  done
 
   if [ -z "$name" ]; then
     log_err "No name specified."
@@ -376,6 +433,11 @@ register_machine()
   fi
 
   require_running_container || return 1
+
+  if [ "$force" = "yes" ]; then
+    dexec cscli machines delete "$name" >/dev/null 2>&1
+    dexec cscli bouncers delete "$name" >/dev/null 2>&1
+  fi
 
   echo
   echo "Registering machine '${name}'..."
@@ -847,10 +909,10 @@ show_help()
   printf "  %-24s%s\n" "logs" "Show the full container log, no line limit"
   printf "  %-24s%s\n" "ban <IP> [duration]" "Add a CrowdSec decision (hub-wide, all agents pick it up)"
   printf "  %-24s%s\n" "unban <IP>" "Delete CrowdSec decisions for an IP"
-  printf "  %-24s%s\n" "register <name>" "Register both machine + bouncer, print a ready-to-paste 'crdsectl register' line"
-  printf "  %-24s%s\n" "addmachine <name>" "Register just a remote agent machine, print its credentials"
+  printf "  %-24s%s\n" "register <name> [-f]" "Register both machine + bouncer, print a ready-to-paste 'crdsectl register' line"
+  printf "  %-24s%s\n" "addmachine <name> [-f]" "Register just a remote agent machine, print its credentials"
   printf "  %-24s%s\n" "machines" "List registered machines"
-  printf "  %-24s%s\n" "addbouncer <name>" "Register just a remote bouncer, print its API key"
+  printf "  %-24s%s\n" "addbouncer <name> [-f]" "Register just a remote bouncer, print its API key"
   printf "  %-24s%s\n" "bouncers" "List registered bouncers"
   printf "  %-24s%s\n" "otlp <url> [opts]" "Configure and apply the OTLP notification endpoint"
   printf "  %-24s%s\n" "testnotif [name]" "Send a test alert through a notification plugin (default: http_default)"
@@ -919,11 +981,13 @@ main()
       ;;
 
     register)
-      register_machine "$2"
+      shift
+      register_machine "$@"
       ;;
 
     addmachine)
-      add_machine "$2"
+      shift
+      add_machine "$@"
       ;;
 
     machines)

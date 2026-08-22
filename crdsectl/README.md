@@ -7,32 +7,32 @@ Domino (Internet password authentication failures) is the service implemented to
 
 Kept in sync with `crdsectl.sh help` - run that directly if this drifts.
 
-| Command                             | Description                                                          |
-|-------------------------------------|----------------------------------------------------------------------|
-| *(none)*                            | Show CrowdSec status                                                 |
-| `help`                              | Show this help                                                       |
-| `install [log-file] [token]`        | Install CrowdSec, bouncer, service config, optional console enroll   |
-| `update [log-file]`                 | Update embedded CrowdSec configuration                               |
-| `test`                              | Test configuration and parser                                        |
-| `status`                            | Show CrowdSec status                                                 |
-| `alerts`                            | List CrowdSec alerts                                                 |
-| `decisions`                         | List active CrowdSec decisions                                       |
-| `metrics`                           | Show CrowdSec metrics                                                |
-| `collections`                       | List installed CrowdSec collections                                  |
-| `enroll <token>`                    | Enroll this instance with the CrowdSec console (SaaS)                |
-| `trust <ca-cert-path>`              | Trust a self-hosted hub's CA (run before `register`, if needed)      |
-| `register <url> <login> <pw> <key>` | Report to / consume decisions from a self-hosted hub                 |
-| `block <IP> [duration]`             | Add a CrowdSec decision                                              |
-| `unblock <IP>`                      | Delete CrowdSec decisions for an IP                                  |
-| `blocktest [IP] [duration]`         | Block a test IP and verify nftables (default 1.2.3.4, 10m)           |
-| `logtest [IP]`                      | Write real test log lines and verify the full log->decision pipeline |
-| `firewall`                          | Show CrowdSec nftables rules                                         |
-| `log [lines]`                       | Show CrowdSec journal (default: 100 lines)                           |
-| `reload`                            | Validate and reload CrowdSec                                         |
-| `restart`                           | Validate and restart CrowdSec and bouncer                            |
-| `systemd [cmd]`                     | Manage CrowdSec and bouncer services                                 |
-| `config`                            | Show CrowdSec configuration                                          |
-| `version`                           | Show version information                                             |
+| Command                                       | Description                                                            |
+|-----------------------------------------------|------------------------------------------------------------------------|
+| *(none)*                                      | Show CrowdSec status                                                   |
+| `help`                                        | Show this help                                                         |
+| `install [log-file] [token]`                  | Install CrowdSec, bouncer, service config, optional console enroll     |
+| `update [log-file]`                           | Update embedded CrowdSec configuration                                 |
+| `test`                                        | Test configuration and parser                                          |
+| `status`                                      | Show CrowdSec status                                                   |
+| `alerts`                                      | List CrowdSec alerts                                                   |
+| `decisions`                                   | List active CrowdSec decisions                                         |
+| `metrics`                                     | Show CrowdSec metrics                                                  |
+| `collections`                                 | List installed CrowdSec collections                                    |
+| `enroll <token>`                              | Enroll this instance with the CrowdSec console (SaaS)                  |
+| `trust <ca-cert-path>`                        | Trust a self-hosted hub's CA (run before `register`, if needed)        |
+| `register <url> <login> <pw> <key>`           | Report to / consume decisions from a self-hosted hub (`--force` overwrites) |
+| `block <IP> [duration]`                       | Add a CrowdSec decision                                                |
+| `unblock <IP>`                                | Delete CrowdSec decisions for an IP                                    |
+| `blocktest [IP] [duration]`                   | Block a test IP and verify nftables (default 1.2.3.4, 10m)             |
+| `logtest [IP]`                                | Write real test log lines and verify the full log->decision pipeline   |
+| `firewall`                                    | Show CrowdSec nftables rules                                           |
+| `log [lines]`                                 | Show CrowdSec journal (default: 100 lines)                             |
+| `reload`                                      | Validate and reload CrowdSec                                           |
+| `restart`                                     | Validate and restart CrowdSec and bouncer                              |
+| `systemd [cmd]`                               | Manage CrowdSec and bouncer services                                   |
+| `config`                                      | Show CrowdSec configuration                                            |
+| `version`                                     | Show version information                                               |
 
 ## Quick start
 
@@ -72,18 +72,29 @@ see its own README), register this agent against it:
 
 ```bash
 crdsectl trust <hub-ca-cert-path>     # only if the hub uses a private/self-signed CA
-crdsectl register <hub-url> <machine-login> <machine-password> <bouncer-key>
+crdsectl register <hub-url> <machine-login> <machine-password> <bouncer-key> [--force]
 ```
 
 `trust` must run first (if needed) - `register` itself takes no CA argument. `<machine-login>`/`<machine-password>`
-and `<bouncer-key>` come from running `addmachine`/`addbouncer` on the hub, not from this script. Live-tested end to
-end 2026-08-21: a registered agent's alert reached the hub and was visible via the hub's own `alerts`/`decisions`
-commands.
+and `<bouncer-key>` come from running `../crdsec-hub/crdsec-hub.sh register` (or `addmachine`/`addbouncer`
+separately) on the hub, not from this script. Live-tested end to end 2026-08-21: a registered agent's alert reached
+the hub and was visible via the hub's own `alerts`/`decisions` commands.
 
 `register` checks it can actually reach `<hub-url>` (including TLS certificate validation) before touching any
 config - if you forgot `trust` first, or the URL/network path is wrong, it fails immediately with a clear message
 instead of writing config, restarting crowdsec, and only then failing deep in `journalctl -xeu crowdsec` with a
 cryptic `x509: certificate signed by unknown authority`.
+
+`register` always checks for a `<file>.local` overlay next to `local_api_credentials.yaml`/
+`crowdsec-firewall-bouncer.yaml` and warns if either sets a credential field - CrowdSec layers these on top of the
+real config file for local customization that survives a package upgrade, and a stale credential left in one
+silently overrides whatever `register` just wrote, with no error anywhere. Found live in production (2026-08-22)
+on a machine that had an older CrowdSec install predating `crdsectl`: every re-registration kept failing with
+`API error: access forbidden`, even though the real config file and a freshly-issued key were both correct -
+untraceable without reading the `.local` file directly, since nothing in the logs points at it. `--force` backs
+the `.local` file up and strips just the conflicting credential lines (not the whole file, in case something else
+legitimate lives there) so the real config's values actually take effect; without `--force`, it only warns and
+leaves the file alone.
 
 This deliberately does not disable the agent's own local CrowdSec LAPI server - on a real deployment (agent and hub
 on separate machines) it sits unused but harmless. It only matters when co-testing agent and hub on one machine (see

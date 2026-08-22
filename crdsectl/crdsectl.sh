@@ -1079,15 +1079,68 @@ check_hub_reachable()
 # Keeping them separate limits blast radius if one leaks: the bouncer key
 # alone can't be used to submit fake alerts, and the machine password
 # alone can't be used to just read the ban list.
+
+# Checks whether a CrowdSec "<file>.local" overlay exists and sets any of
+# the given credential-relevant keys (an "^(a|b|c)"-shaped grep -E
+# pattern) - these silently override the real config file's values with
+# no error anywhere if left stale, which is exactly what happened live in
+# production (see the comment at the call site). Without force, just
+# warns and lists what it found; with force, backs the .local file up and
+# strips the matching lines so the real config file's values actually win.
+check_local_override()
+{
+  local local_file="$1"
+  local key_pattern="$2"
+  local force="$3"
+
+  $SUDO test -e "$local_file" || return 0
+
+  local matches
+  matches=$($SUDO grep -E "^(${key_pattern})" "$local_file" 2>/dev/null)
+
+  [ -z "$matches" ] && return 0
+
+  echo
+  echo "Warning: ${local_file} exists and sets these values - they silently"
+  echo "override what was just written above, with no error if they're wrong:"
+  echo "$matches" | sed 's/^/  /'
+
+  if [ "$force" = "yes" ]; then
+    local backup
+    backup=$(mktemp)
+    $SUDO cp -a "$local_file" "$backup"
+    $SUDO sed -i -E "/^(${key_pattern})/d" "$local_file"
+    echo "--force: removed the lines above from ${local_file} (backup: ${backup})."
+  else
+    echo "Re-run with --force to remove them automatically, or edit ${local_file} by hand."
+  fi
+}
+
+
 register_lapi()
 {
   local hub_url="$1"
   local machine_login="$2"
   local machine_password="$3"
   local bouncer_key="$4"
+  shift 4 2>/dev/null
+
+  local force="no"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --force|-f)
+        force="yes"
+        ;;
+      *)
+        log_err "Unknown option: '$1'"
+        return 1
+        ;;
+    esac
+    shift
+  done
 
   if [ -z "$hub_url" ] || [ -z "$machine_login" ] || [ -z "$machine_password" ] || [ -z "$bouncer_key" ]; then
-    log_err "Usage: crdsectl register <url> <machine-login> <machine-password> <bouncer-key>"
+    log_err "Usage: crdsectl register <url> <machine-login> <machine-password> <bouncer-key> [--force]"
     return 1
   fi
 
@@ -1170,6 +1223,21 @@ EOF
     rm -rf "$tmpdir"
     return 1
   fi
+
+  # CrowdSec layers an optional "<file>.local" on top of the real config
+  # file, for local customization that survives a package upgrade. A
+  # credential field left over in one of these silently overrides whatever
+  # register just wrote above, with no error anywhere - found live in
+  # production (2026-08-22): a stale api_key in
+  # crowdsec-firewall-bouncer.yaml.local (from a CrowdSec install that
+  # pre-dated crdsectl on that machine) caused every re-registration to
+  # keep failing with "access forbidden", even though the real config file
+  # and the freshly-issued key were both correct - untraceable without
+  # reading the .local file directly, since nothing in the logs points at
+  # it. Surfaced here unconditionally (not just under --force) so this
+  # can't silently recur.
+  check_local_override "${creds_file}.local" "url:|login:|password:" "$force"
+  check_local_override "${bouncer_config}.local" "api_url:|api_key:" "$force"
 
   echo
   echo "Validating CrowdSec configuration..."
@@ -1562,7 +1630,7 @@ show_help()
   printf "  %-37s%s\n" "collections" "List installed CrowdSec collections"
   printf "  %-37s%s\n" "enroll <token>" "Enroll this instance with the CrowdSec console"
   printf "  %-37s%s\n" "trust <ca-cert-path>" "Trust a self-hosted hub's CA (run before register, if needed)"
-  printf "  %-37s%s\n" "register <url> <login> <pw> <key>" "Report to / consume decisions from a self-hosted hub"
+  printf "  %-37s%s\n" "register <url> <login> <pw> <key>" "Report to / consume decisions from a self-hosted hub (add --force to overwrite)"
   printf "  %-37s%s\n" "block <IP> [duration]" "Add a CrowdSec decision"
   printf "  %-37s%s\n" "unblock <IP>" "Delete CrowdSec decisions for an IP"
   printf "  %-37s%s\n" "blocktest [IP] [duration]" "Block a test IP and verify nftables (default 1.2.3.4, 10m)"
@@ -1661,7 +1729,8 @@ main()
       ;;
 
     register)
-      register_lapi "$2" "$3" "$4" "$5"
+      shift
+      register_lapi "$@"
       ;;
 
     block)
