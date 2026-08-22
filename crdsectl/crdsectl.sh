@@ -27,7 +27,7 @@
 #                                                                         #
 ###########################################################################
 
-CRDSECTL_VERSION="0.9.0"
+CRDSECTL_VERSION="0.9.1"
 CRDSECTL_CONFIG_VERSION="1"
 
 CROWDSEC_SERVICE="crowdsec"
@@ -44,7 +44,7 @@ CRDSECTL_SCENARIO_FILE="${CROWDSEC_SCENARIO_DIR}/domino-auth-bf.yaml"
 CRDSECTL_INSTALL_PATH="/usr/local/bin/crdsectl"
 
 # CRDSECTL_URL is only used for a piped remote install, e.g.:
-#   export CRDSECTL_URL=https://raw.githubusercontent.com/<org>/<repo>/main/crdsectl/crdsectl.sh; curl -fsSL "$CRDSECTL_URL" | bash -
+#   export CRDSECTL_URL=https://raw.githubusercontent.com/nashcom/crowdsec-tools/main/crdsectl/crdsectl.sh; curl -fsSL "$CRDSECTL_URL" | bash -
 # When piped this way, $0 is just the shell's own name (e.g. "bash"), not a
 # real file, so install_self() re-downloads a real copy from CRDSECTL_URL to
 # install. Set here only as documentation; the actual value always comes
@@ -568,6 +568,30 @@ update_domino_config()
 # Installation
 ###############################################################################
 
+# Pre-flight check for install_crowdsec(): CrowdSec's local API defaults to
+# binding 127.0.0.1:8080 (confirmed against docs.crowdsec.net, not
+# assumed) - a very commonly-squatted port for other local dev
+# tools/services. If something else already has it, crowdsec fails to
+# start with a bind error that's only visible via journalctl, discovered
+# live in production once already (a stale leftover container holding the
+# port). Checking here gives a clear message before the package is even
+# installed, matching register_lapi's own check_hub_reachable pre-flight.
+# Uses bash's own /dev/tcp (no dependency on ss/netstat, which may not be
+# installed yet this early in a fresh install).
+check_lapi_port_free()
+{
+  local host="127.0.0.1"
+  local port="8080"
+
+  if timeout 1 bash -c "echo >/dev/tcp/${host}/${port}" 2>/dev/null; then
+    log_err "Something is already listening on ${host}:${port} - CrowdSec's local API defaults to this address and will fail to start there. Free the port first (eg 'ss -ltnp | grep ${port}' to find what's using it), or re-run once it's clear."
+    return 1
+  fi
+
+  return 0
+}
+
+
 install_crowdsec()
 {
   local log_file_override="$1"
@@ -589,6 +613,12 @@ install_crowdsec()
   install_self || return 1
 
   if ! have_command crowdsec || ! have_command cscli; then
+    # Only checked here (fresh install) - once crowdsec is already
+    # installed, whatever's listening on 8080 is expected to be crowdsec
+    # itself, not a conflict, and a plain "install" re-run/update should
+    # not fail on that.
+    check_lapi_port_free || return 1
+
     echo "Installing CrowdSec repository..."
 
     pkg_update || return 1
@@ -1651,7 +1681,7 @@ show_help()
   printf "  %-37s%s\n" "version" "Show version information"
   echo
   echo "Remote install:"
-  echo "  export CRDSECTL_URL=https://raw.githubusercontent.com/<org>/<repo>/main/crdsectl/crdsectl.sh; curl -fsSL \"\$CRDSECTL_URL\" | bash -"
+  echo "  export CRDSECTL_URL=https://raw.githubusercontent.com/nashcom/crowdsec-tools/main/crdsectl/crdsectl.sh; curl -fsSL \"\$CRDSECTL_URL\" | bash -"
   echo
 }
 

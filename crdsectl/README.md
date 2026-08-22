@@ -39,13 +39,20 @@ Kept in sync with `crdsectl.sh help` - run that directly if this drifts.
 On a Domino server (Debian/Ubuntu or RHEL/Fedora):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/<org>/<repo>/main/crdsectl/crdsectl.sh -o crdsectl.sh
+curl -fsSL https://raw.githubusercontent.com/nashcom/crowdsec-tools/main/crdsectl/crdsectl.sh -o crdsectl.sh
 sudo bash crdsectl.sh install
 ```
 
 `install` installs CrowdSec and crowdsec-firewall-bouncer via the system package manager, generates the Domino-specific
 acquisition/parser/scenario (matching Domino's `authentication failure using internet password` output log line), and
 installs itself to `/usr/local/bin/crdsectl`. Afterward, run `crdsectl status` to check it.
+
+Before a fresh install, `install` checks that `127.0.0.1:8080` - CrowdSec's own documented default local API address -
+isn't already taken by something else. That port is a common default for other local dev tools/services too, and a
+conflict there means CrowdSec's own service fails to start with a bind error only visible via `journalctl` -
+checking first surfaces that clearly, before the package is even installed, rather than after. Only runs on a fresh
+install (not on a plain re-run/update against an already-installed CrowdSec, where that port is expected to already
+be crowdsec itself).
 
 Three tiers of self-test, from least to most invasive:
 
@@ -60,7 +67,7 @@ Three tiers of self-test, from least to most invasive:
 Alternatively, a piped remote install:
 
 ```bash
-export CRDSECTL_URL=https://raw.githubusercontent.com/<org>/<repo>/main/crdsectl/crdsectl.sh
+export CRDSECTL_URL=https://raw.githubusercontent.com/nashcom/crowdsec-tools/main/crdsectl/crdsectl.sh
 curl -fsSL "$CRDSECTL_URL" | sudo -E bash -
 ```
 
