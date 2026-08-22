@@ -1,0 +1,5 @@
+# Force LF everywhere, regardless of a contributor's core.autocrlf setting -
+# a CRLF shebang line breaks these scripts outright on Linux.
+* text=auto eol=lf
+
+*.sh text eol=lf

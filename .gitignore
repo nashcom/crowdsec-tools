@@ -1,0 +1,8 @@
+# Runtime state per subproject is gitignored locally (see crdsec-hub/.gitignore) -
+# this file only covers cross-cutting, editor/OS-level noise.
+
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
