@@ -35,15 +35,15 @@ real network path, or a production-issued (non-self-signed) certificate.
 - `crdsec-hub.sh` - runs on the host, not inside the container. `up`/`down` delegate to `docker compose`;
   `status` and the machine/bouncer commands use `docker exec` against the running container.
 - `env.example` - copy to `.env` to override `HUB_HOST` (the hostname/IP remote agents use to reach this hub -
-  defaults to `localhost`, only useful for same-machine testing), `NGINX_HTTP_PORT`/`NGINX_HTTPS_PORT`,
-  `COLLECTIONS`, or `IMAGE_TAG`. Not required; the compose file's own defaults apply without one.
+  defaults to `localhost`, only useful for same-machine testing), `NGINX_HTTPS_PORT`, `COLLECTIONS`, or
+  `IMAGE_TAG`. Not required; the compose file's own defaults apply without one.
 - `data/` and `config/` - created on first `up`, bind-mounted host directories (not Docker-managed volumes) holding
   the decision database and CrowdSec's config, including whatever `addmachine`/`addbouncer` generate. Deliberately
   plain host directories rather than opaque Docker volumes, so the state is easy to find, inspect, or back up
   directly. Gitignored - this is runtime state, not something to commit.
-- `nginx.conf` - TLS termination in front of the LAPI. nginx listens on host ports 8080 (HTTP, redirects to HTTPS)
-  and 8443 (HTTPS), reverse-proxying to the `crowdsec` compose service over plain HTTP internally - crowdsec itself
-  is not reachable from the host directly.
+- `nginx.conf` - TLS termination in front of the LAPI. HTTPS-only by design - nginx listens on host port 8443 only
+  (no port 80, nothing to redirect), reverse-proxying to the `crowdsec` compose service over plain HTTP internally -
+  crowdsec itself is not reachable from the host directly.
 - `gen-cert.sh` - generates a local test CA (`tls/ca.key` + `tls/ca.crt`, ECDSA P-256) and a leaf cert signed
   by it (`tls/tls.key` + `tls/tls.crt`, also ECDSA P-256) for local testing, all in `tls/`. The CA is only generated
   once and reused on every later run - regenerating it would invalidate every agent that already trusts the old
@@ -55,9 +55,6 @@ real network path, or a production-issued (non-self-signed) certificate.
   production otherwise either - a real deployment wants a real CA-issued cert instead (e.g. via ACME, see
   nashcom-labs/lego). `tls/` is gitignored.
 - `testing/` - dev/debug tooling, not part of normal operation:
-  - `webhook-consumer.sh` - temporary local debug receiver (plain `openssl s_server`, reuses the hub's own leaf
-    cert) that dumps whatever raw HTTP request it receives - used to inspect `crdsec-hub`'s own outgoing OTLP
-    payload during development, not to validate anything against real OTLP semantics.
   - `test-otlp.sh` - standalone isolation test: POSTs a minimal, hand-built, spec-compliant OTLP JSON logs export
     directly to an OTLP/HTTP endpoint via `curl`, with no CrowdSec/`crdsec-hub` involved at all. Used to confirm
     whether a receiving endpoint requires the real OTLP envelope, independent of this project's own Go template -
@@ -168,9 +165,9 @@ token) is visible via `./crdsec-hub.sh log` while debugging - keep that in mind 
 
 **Status: live-verified end to end (2026-08-22)** against a real Loki instance, with both a synthetic
 `cscli notifications test` alert (clean `204`) and a genuine `crdsectl`-detected decision (visible and correctly
-parsed/leveled in Grafana). `webhook-consumer.sh` (plain `openssl s_server`, dumps whatever it receives) was used
-during earlier development against a temporary local receiver and still works for offline debugging, but is no
-longer the normal target - point `otlp` at a real OTLP/Loki endpoint directly.
+parsed/leveled in Grafana), across multiple independent production machines reporting to the same hub. Point `otlp`
+at a real OTLP/Loki endpoint directly; `http.yaml`'s `log_level: debug` (visible via `crdsec-hub.sh log`) is enough
+on its own to inspect the exact outgoing request during setup - no separate local debug receiver needed.
 
 **Outer OTLP envelope** (real, spec-compliant - `logRecords[0]` only):
 

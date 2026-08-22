@@ -18,7 +18,7 @@
 # See the License for the specific language governing permissions and     #
 # limitations under the License.                                          #
 #                                                                         #
-# Version 0.9.0                                                           #
+# Version 0.9.1                                                           #
 #                                                                         #
 # Purpose:                                                                #
 #                                                                         #
@@ -45,7 +45,7 @@
 #                                                                         #
 ###########################################################################
 
-CRDSEC_HUB_VERSION="0.9.0"
+CRDSEC_HUB_VERSION="0.9.1"
 
 CONTAINER_NAME="crdsec-hub"
 

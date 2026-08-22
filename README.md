@@ -145,6 +145,8 @@ description: "Parse HCL Domino authentication failures"
 
 filter: "evt.Line.Labels.type == 'domino'"
 
+onsuccess: next_stage
+
 grok:
   pattern: '.*\[%{IP:source_ip}\] authentication failure using internet password.*'
   apply_on: Line.Raw
@@ -174,6 +176,11 @@ groupby: evt.Meta.source_ip
 capacity: 5
 leakspeed: "5m"
 blackhole: 5m
+
+labels:
+  service: domino
+  type: bruteforce
+  remediation: true
 ```
 
 ## Layout

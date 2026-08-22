@@ -1,10 +1,4 @@
-# crowdsec-net is shared with the agent test rig (../crdsectl/run-install-test-container.sh) for
-# when it's NOT run with --network host. Compose creates/owns it (name:
-# pins the actual network name instead of compose's default project-
-# prefixed one) - NOT external:true, since that requires the network to
-# already exist and errors out otherwise if this comes up first. run-install-test-container.sh's
-# bridge mode still does its own idempotent "docker network create" as a
-# fallback for when the agent container starts before this does.
+
 networks:
   crowdsec-net:
     name: crowdsec-net
@@ -20,14 +14,6 @@ services:
 
     networks:
       - crowdsec-net
-
-    # Lets this container resolve the Docker host itself as
-    # host.docker.internal - reliable on Docker Desktop already, but
-    # plain Docker Engine (e.g. WSL2 without Desktop) needs this explicit
-    # opt-in. Only actually used for ad hoc host-side debugging (e.g. a
-    # temporary local webhook receiver), not by anything in normal operation.
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
 
     volumes:
       - ./data:/var/lib/crowdsec/data

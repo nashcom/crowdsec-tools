@@ -18,6 +18,8 @@
 # See the License for the specific language governing permissions and     #
 # limitations under the License.                                          #
 #                                                                         #
+# Version 0.9.1                                                           #
+#                                                                         #
 # Install, configure and operate CrowdSec as a per-service brute-force /  #
 # auth-failure guard. Manages two components: "crowdsec" (detects,        #
 # scores, decides) and "crowdsec-firewall-bouncer" (enforces via          #
