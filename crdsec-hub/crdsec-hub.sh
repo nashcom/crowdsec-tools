@@ -995,7 +995,8 @@ main()
       ;;
 
     addbouncer)
-      add_bouncer "$2"
+      shift
+      add_bouncer "$@"
       ;;
 
     bouncers)

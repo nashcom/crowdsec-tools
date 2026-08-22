@@ -1123,7 +1123,19 @@ register_lapi()
   local machine_login="$2"
   local machine_password="$3"
   local bouncer_key="$4"
-  shift 4 2>/dev/null
+
+  # Checked before "shift 4" deliberately: "shift 4" is a no-op (silently,
+  # since bash errors "shift count out of range" rather than shifting
+  # partially) when fewer than 4 args were actually given - confirmed live
+  # (2026-08-22) that skipping this check first left $1 still holding the
+  # URL, which the --force-parsing loop below then misread as an unknown
+  # option ("Unknown option: 'https://...'") instead of this usage message.
+  if [ -z "$hub_url" ] || [ -z "$machine_login" ] || [ -z "$machine_password" ] || [ -z "$bouncer_key" ]; then
+    log_err "Usage: crdsectl register <url> <machine-login> <machine-password> <bouncer-key> [--force]"
+    return 1
+  fi
+
+  shift 4
 
   local force="no"
   while [ $# -gt 0 ]; do
@@ -1138,11 +1150,6 @@ register_lapi()
     esac
     shift
   done
-
-  if [ -z "$hub_url" ] || [ -z "$machine_login" ] || [ -z "$machine_password" ] || [ -z "$bouncer_key" ]; then
-    log_err "Usage: crdsectl register <url> <machine-login> <machine-password> <bouncer-key> [--force]"
-    return 1
-  fi
 
   # Normalize once so the two files below don't end up with inconsistent
   # trailing slashes depending on how the caller typed the URL.
