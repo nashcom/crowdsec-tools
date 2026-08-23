@@ -18,7 +18,7 @@
 # See the License for the specific language governing permissions and     #
 # limitations under the License.                                          #
 #                                                                         #
-# Version 0.9.1                                                           #
+# Version 0.9.2                                                           #
 #                                                                         #
 # Install, configure and operate CrowdSec as a per-service brute-force /  #
 # auth-failure guard. Manages two components: "crowdsec" (detects,        #
@@ -29,7 +29,7 @@
 #                                                                         #
 ###########################################################################
 
-CRDSECTL_VERSION="0.9.1"
+CRDSECTL_VERSION="0.9.2"
 CRDSECTL_CONFIG_VERSION="1"
 
 CROWDSEC_SERVICE="crowdsec"
@@ -1427,9 +1427,36 @@ test_block()
   else
     printf "%-24s :  %s\n" "Firewall block" "FAILED"
     echo
-    echo "${ip} was not found in the nftables ruleset. Check:"
-    echo "  systemctl status ${BOUNCER_SERVICE}"
-    echo "  journalctl -u ${BOUNCER_SERVICE} --no-pager -n 50"
+
+    # Real bug found live (2026-08-22): a crowdsec-firewall-bouncer build
+    # on one machine (same v0.0.36, but an older embedded Go toolchain
+    # than a working machine's build - GoVersion 1.22.2 vs 1.25.0) wrote
+    # decisions into nftables with their IPv4 octets reversed
+    # (2.3.4.10 -> 10.4.3.2). The decision itself was correct in
+    # "cscli decisions list" the whole time - only the bouncer's own
+    # nftables write was wrong. Checking for the reversed form here turns
+    # a generic "not found, go check journalctl" into an immediate,
+    # specific diagnosis instead of a manual investigation.
+    local reversed_ip=""
+    case "$ip" in
+      *.*.*.*)
+        reversed_ip=$(echo "$ip" | awk -F. '{print $4"."$3"."$2"."$1}')
+        ;;
+    esac
+
+    if [ -n "$reversed_ip" ] && $SUDO nft list ruleset | grep -q "$reversed_ip"; then
+      echo "${ip} wasn't found, but ${reversed_ip} (its octets reversed) was."
+      echo "This looks like a crowdsec-firewall-bouncer bug writing decisions"
+      echo "into nftables with the IP byte-reversed, not a sync failure - the"
+      echo "decision itself is almost certainly correct (check with"
+      echo "\"crdsectl decisions\"). Compare \"crowdsec-firewall-bouncer -V\""
+      echo "against a machine where this works - a differing embedded"
+      echo "GoVersion is the one confirmed correlation so far."
+    else
+      echo "${ip} was not found in the nftables ruleset. Check:"
+      echo "  systemctl status ${BOUNCER_SERVICE}"
+      echo "  journalctl -u ${BOUNCER_SERVICE} --no-pager -n 50"
+    fi
   fi
 
   echo
