@@ -18,7 +18,7 @@
 # See the License for the specific language governing permissions and     #
 # limitations under the License.                                          #
 #                                                                         #
-# Version 0.9.4                                                           #
+# Version 0.9.5                                                           #
 #                                                                         #
 # Install, configure and operate CrowdSec as a per-service brute-force /  #
 # auth-failure guard. Manages two components: "crowdsec" (detects,        #
@@ -29,7 +29,7 @@
 #                                                                         #
 ###########################################################################
 
-CRDSECTL_VERSION="0.9.4"
+CRDSECTL_VERSION="0.9.5"
 CRDSECTL_CONFIG_VERSION="1"
 
 CROWDSEC_SERVICE="crowdsec"
@@ -535,6 +535,8 @@ upgrade_self()
     echo "Updated to ${candidate_version}."
   fi
 
+  echo
+
   return 0
 }
 
@@ -818,6 +820,20 @@ file_state()
   else
     echo "missing"
   fi
+}
+
+
+# The path CrowdSec is actually watching, read back out of the generated
+# acquis.d/domino.yaml - distinct from $DOMINO_OUTPUT_LOG, which is only
+# what load_domino_config() would compute *right now* from the
+# environment/rc_domino_config. Those two can genuinely diverge (e.g.
+# DOMINO_DATA_PATH changed in rc_domino_config since the last "update")
+# - status shows both if they differ, rather than silently only ever
+# reporting the live-computed guess as if it were the real, running state.
+get_configured_output_log()
+{
+  $SUDO test -e "$CRDSECTL_ACQUIS_FILE" || return 1
+  $SUDO awk '/^filenames:/{getline; sub(/^[[:space:]]*-[[:space:]]*/,""); print; exit}' "$CRDSECTL_ACQUIS_FILE"
 }
 
 
@@ -1150,9 +1166,23 @@ show_status()
   fi
 
   echo
-  printf "%-24s :  %s\n" "Output log" "$DOMINO_OUTPUT_LOG"
 
-  if [ -r "$DOMINO_OUTPUT_LOG" ]; then
+  local configured_log
+  configured_log=$(get_configured_output_log)
+  local check_log
+
+  if [ -z "$configured_log" ]; then
+    printf "%-24s :  %s\n" "Output log" "not installed yet"
+    check_log="$DOMINO_OUTPUT_LOG"
+  elif [ "$configured_log" = "$DOMINO_OUTPUT_LOG" ]; then
+    printf "%-24s :  %s\n" "Output log" "$configured_log"
+    check_log="$configured_log"
+  else
+    printf "%-24s :  %s\n" "Output log" "${configured_log} (DOMINO_OUTPUT_LOG's current setting is ${DOMINO_OUTPUT_LOG} - run 'update' to apply)"
+    check_log="$configured_log"
+  fi
+
+  if [ -r "$check_log" ]; then
     printf "%-24s :  %s\n" "Output log access" "OK"
   else
     printf "%-24s :  %s\n" "Output log access" "NOT READABLE"
