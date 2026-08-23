@@ -7,32 +7,33 @@ Domino (Internet password authentication failures) is the service implemented to
 
 Kept in sync with `crdsectl.sh help` - run that directly if this drifts.
 
-| Command                                       | Description                                                            |
-|-----------------------------------------------|------------------------------------------------------------------------|
-| *(none)*                                      | Show CrowdSec status                                                   |
-| `help`                                        | Show this help                                                         |
-| `install [log-file] [token]`                  | Install CrowdSec, bouncer, service config, optional console enroll     |
-| `update [log-file]`                           | Update embedded CrowdSec configuration                                 |
-| `test`                                        | Test configuration and parser                                          |
-| `status`                                      | Show CrowdSec status                                                   |
-| `alerts`                                      | List CrowdSec alerts                                                   |
-| `decisions`                                   | List active CrowdSec decisions                                         |
-| `metrics`                                     | Show CrowdSec metrics                                                  |
-| `collections`                                 | List installed CrowdSec collections                                    |
-| `enroll <token>`                              | Enroll this instance with the CrowdSec console (SaaS)                  |
-| `trust <ca-cert-path>`                        | Trust a self-hosted hub's CA (run before `register`, if needed)        |
-| `register <url> <login> <pw> <key>`           | Report to / consume decisions from a self-hosted hub (`--force` overwrites) |
-| `block <IP> [duration]`                       | Add a CrowdSec decision                                                |
-| `unblock <IP>`                                | Delete CrowdSec decisions for an IP                                    |
-| `blocktest [IP] [duration]`                   | Block a test IP and verify nftables (default 1.2.3.4, 10m)             |
-| `logtest [IP]`                                | Write real test log lines and verify the full log->decision pipeline   |
-| `firewall`                                    | Show CrowdSec nftables rules                                           |
-| `log [lines]`                                 | Show CrowdSec journal (default: 100 lines)                             |
-| `reload`                                      | Validate and reload CrowdSec                                           |
-| `restart`                                     | Validate and restart CrowdSec and bouncer                              |
-| `systemd [cmd]`                               | Manage CrowdSec and bouncer services                                   |
-| `config`                                      | Show CrowdSec configuration                                            |
-| `version`                                     | Show version information                                               |
+| Command                                         | Description                                                                 |
+|-------------------------------------------------|-----------------------------------------------------------------------------|
+| *(none)*                                        | Show CrowdSec status                                                        |
+| `help`                                          | Show this help                                                              |
+| `install [log-file] [token]`                    | Install CrowdSec, bouncer, service config, optional console enroll          |
+| `update [log-file]`                             | Update embedded CrowdSec configuration                                      |
+| `upgrade`                                       | Update the crdsectl script itself (from GitHub, or run a newer local file)  |
+| `test`                                          | Test configuration and parser                                               |
+| `status`                                        | Show CrowdSec status                                                        |
+| `alerts`                                        | List CrowdSec alerts                                                        |
+| `decisions`                                     | List active CrowdSec decisions                                              |
+| `metrics`                                       | Show CrowdSec metrics                                                       |
+| `collections`                                   | List installed CrowdSec collections                                         |
+| `enroll <token>`                                | Enroll this instance with the CrowdSec console (SaaS)                       |
+| `trust <ca-cert-path>`                          | Trust a self-hosted hub's CA (run before `register`, if needed)             |
+| `register <url> <login> <pw> <key>`             | Report to / consume decisions from a self-hosted hub (`--force` overwrites) |
+| `block <IP> [duration]`                         | Add a CrowdSec decision                                                     |
+| `unblock <IP>`                                  | Delete CrowdSec decisions for an IP                                         |
+| `blocktest [IP] [duration]`                     | Block a test IP and verify nftables (default 1.2.3.4, 10m)                  |
+| `logtest [IP]`                                  | Write real test log lines and verify the full log->decision pipeline        |
+| `firewall`                                      | Show CrowdSec nftables rules                                                |
+| `log [lines]`                                   | Show CrowdSec journal (default: 100 lines)                                  |
+| `reload`                                        | Validate and reload CrowdSec                                                |
+| `restart`                                       | Validate and restart CrowdSec and bouncer                                   |
+| `systemd [cmd]`                                 | Manage CrowdSec and bouncer services                                        |
+| `config`                                        | Show CrowdSec configuration                                                 |
+| `version`                                       | Show version information                                                    |
 
 ## Quick start
 
@@ -53,6 +54,20 @@ conflict there means CrowdSec's own service fails to start with a bind error onl
 checking first surfaces that clearly, before the package is even installed, rather than after. Only runs on a fresh
 install (not on a plain re-run/update against an already-installed CrowdSec, where that port is expected to already
 be crowdsec itself).
+
+To update the `crdsectl` script itself later (distinct from `update`, which regenerates the embedded Domino
+config, not this script) - same convention as `install` already uses, no separate argument for which file:
+
+```bash
+crdsectl upgrade                    # pulls the latest from GitHub
+bash /path/to/newer.sh upgrade      # or from a local file (e.g. one you scp'd over) - run that file directly
+```
+
+`upgrade` prefers the script currently being run (`$0`) over a GitHub download - if you've just `git pull`'d or
+`scp`'d a newer copy and are running that file directly, it uses that instead of a redundant network fetch (falls
+back to GitHub only when `$0` isn't a real file, e.g. a piped install, or is the same file already installed at
+`/usr/local/bin/crdsectl`, in which case there's nothing local to compare against). Either way it shows the
+actually-installed version (read from disk, not assumed) against the candidate's before applying anything.
 
 Three tiers of self-test, from least to most invasive:
 

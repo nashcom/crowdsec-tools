@@ -454,6 +454,91 @@ install_self()
 }
 
 
+# Updates the installed crdsectl.sh binary itself (distinct from "update",
+# which regenerates the embedded Domino config, not this script). Same
+# source convention as install_self(): no separate argument to say which
+# file - the source is inferred from how this script is invoked ($0). To
+# upgrade from a specific local file (e.g. one just scp'd over), run that
+# file directly ("bash /path/to/newer.sh upgrade"), the same way you'd
+# already run "bash newer.sh install" to self-install from it - not a
+# second argument to the subcommand. $0 is skipped when it's the
+# already-installed file itself (running the installed "crdsectl" command
+# with no args would otherwise compare it against itself, always
+# "unchanged", not useful) - falls back to a download from CRDSECTL_URL
+# (default: the real GitHub repo) in that case. Always shows the
+# installed vs. candidate version before applying, so a machine you're
+# not actively watching doesn't silently jump versions with no visibility
+# into what changed. install_generated_file's own content diff still
+# governs whether anything is actually written - this just makes the
+# version difference visible on top of that.
+upgrade_self()
+{
+  require_root || return 1
+
+  local candidate_path
+  local tmp_download=""
+
+  if [ -f "$0" ] && [ "$0" != "$CRDSECTL_INSTALL_PATH" ]; then
+    candidate_path="$0"
+    echo "Checking version from the running script: ${0}"
+  else
+    local url="${CRDSECTL_URL:-https://raw.githubusercontent.com/nashcom/crowdsec-tools/main/crdsectl/crdsectl.sh}"
+    echo "Checking version from: ${url}"
+
+    tmp_download=$(mktemp) || return 1
+
+    if ! curl -fsSL "$url" -o "$tmp_download"; then
+      log_err "Failed to download crdsectl from ${url}."
+      rm -f "$tmp_download"
+      return 1
+    fi
+
+    candidate_path="$tmp_download"
+  fi
+
+  local candidate_version
+  candidate_version=$(grep -m1 '^CRDSECTL_VERSION=' "$candidate_path" | sed -E 's/^CRDSECTL_VERSION="([^"]*)"$/\1/')
+
+  if [ -z "$candidate_version" ]; then
+    log_err "Could not determine a version from that file - doesn't look like a valid crdsectl.sh."
+    rm -f "$tmp_download"
+    return 1
+  fi
+
+  # Deliberately read from $CRDSECTL_INSTALL_PATH on disk, not the
+  # $CRDSECTL_VERSION constant of the script currently running - those
+  # differ whenever $0 is a newer file than what's actually installed
+  # (e.g. just git-pulled a newer copy and running it directly), and
+  # trusting the constant would show the wrong "Installed version".
+  local installed_version="not installed yet"
+  if [ -f "$CRDSECTL_INSTALL_PATH" ]; then
+    installed_version=$(grep -m1 '^CRDSECTL_VERSION=' "$CRDSECTL_INSTALL_PATH" | sed -E 's/^CRDSECTL_VERSION="([^"]*)"$/\1/')
+    [ -z "$installed_version" ] && installed_version="unknown"
+  fi
+
+  echo
+  printf "%-24s :  %s\n" "Installed version" "$installed_version"
+  printf "%-24s :  %s\n" "Available version" "$candidate_version"
+  echo
+
+  install_generated_file "$candidate_path" "$CRDSECTL_INSTALL_PATH" 0755
+  local rc=$?
+
+  rm -f "$tmp_download"
+
+  if [ $rc -ne 0 ] && [ $rc -ne 2 ]; then
+    return 1
+  fi
+
+  if [ $rc -eq 2 ]; then
+    echo
+    echo "Updated to ${candidate_version}."
+  fi
+
+  return 0
+}
+
+
 update_domino_config()
 {
   local log_file_override="$1"
@@ -1688,6 +1773,7 @@ show_help()
   printf "  %-37s%s\n" "help" "Show this help"
   printf "  %-37s%s\n" "install [log-file] [token]" "Install CrowdSec, bouncer, service config, optional console enroll"
   printf "  %-37s%s\n" "update [log-file]" "Update embedded CrowdSec configuration"
+  printf "  %-37s%s\n" "upgrade" "Update the crdsectl script itself (from GitHub, or run a newer local file directly)"
   printf "  %-37s%s\n" "test" "Test configuration and parser"
   printf "  %-37s%s\n" "status" "Show CrowdSec status"
   printf "  %-37s%s\n" "alerts" "List CrowdSec alerts"
@@ -1760,6 +1846,10 @@ main()
       fi
 
       return $rc
+      ;;
+
+    upgrade)
+      upgrade_self
       ;;
 
     test)
