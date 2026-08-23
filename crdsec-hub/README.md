@@ -142,11 +142,16 @@ Configure and apply the target endpoint with:
 This regenerates `config/notifications/http.yaml` from the template above, checks the endpoint is reachable
 (reporting a clear message if the TLS certificate specifically doesn't validate, same style as `crdsectl.sh
 register`'s pre-flight check - non-fatal here, since an unreachable endpoint just means notifications won't
-deliver yet), installs the file (no-op if unchanged), and restarts the hub (notification plugin config is only
-read at CrowdSec startup, confirmed live - a template change silently kept using the old version until restarted).
-It does **not** send a test alert automatically - that would push a dummy record to the real endpoint on every
-reconfigure. Run `./crdsec-hub.sh testnotif [name]` (default `http_default`) afterward, any time, to verify
-delivery through the real endpoint without regenerating config.
+deliver yet), installs the file (no-op if unchanged), enables `http_default` in `profiles.yaml`'s
+`default_ip_remediation` profile if it's still commented out (CrowdSec ships this off by default - found live
+2026-08-22 on a hub where it had never been turned on: real decisions never fired a notification even though the
+plugin itself worked fine via `testnotif`, which bypasses `profiles.yaml` entirely and so never surfaced the gap),
+and restarts the hub (both notification plugin config and profile wiring are only read at CrowdSec startup,
+confirmed live - a config change silently kept using the old behavior until restarted). It does **not** send a
+test alert automatically - that would push a dummy record to the real endpoint on every reconfigure. Run
+`./crdsec-hub.sh testnotif [name]` (default `http_default`) afterward, any time, to verify delivery through the
+real endpoint without regenerating config - though remember that command alone can't catch a `profiles.yaml` gap,
+since it deliberately bypasses that file.
 
 - `--insecure` sets `skip_tls_verification: true`, for a self-signed/testing endpoint - omit it for a real
   endpoint with a trusted certificate.

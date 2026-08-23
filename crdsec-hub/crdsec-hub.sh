@@ -18,7 +18,7 @@
 # See the License for the specific language governing permissions and     #
 # limitations under the License.                                          #
 #                                                                         #
-# Version 0.9.1                                                           #
+# Version 0.9.2                                                           #
 #                                                                         #
 # Purpose:                                                                #
 #                                                                         #
@@ -45,7 +45,7 @@
 #                                                                         #
 ###########################################################################
 
-CRDSEC_HUB_VERSION="0.9.1"
+CRDSEC_HUB_VERSION="0.9.2"
 
 CONTAINER_NAME="crdsec-hub"
 
@@ -717,6 +717,47 @@ check_otlp_endpoint()
 }
 
 
+# Enables http_default in profiles.yaml's default_ip_remediation profile -
+# CrowdSec ships this commented out by default, and otlp never wired it
+# up before, only managed the plugin's own config. Real decisions were
+# silently never notifying because of this - "testnotif" alone couldn't
+# catch it, since that bypasses profiles.yaml entirely. Only touches the
+# first profile (default_range_remediation is left alone - unused here).
+# Idempotent. Returns 0 if it changed something (needs a restart), 1 if
+# there was nothing to do.
+enable_profile_notification()
+{
+  local profiles_file
+  profiles_file="$(dirname "$0")/config/profiles.yaml"
+
+  [ -e "$profiles_file" ] || return 1
+
+  local tmp
+  tmp=$(mktemp) || return 1
+
+  awk '
+    BEGIN { doc = 1 }
+    /^---$/ { doc++; print; next }
+    doc == 1 && /^# notifications:$/ { sub(/^# /, ""); print; next }
+    doc == 1 && /^#   - http_default/ { sub(/^#/, ""); print; next }
+    { print }
+  ' "$profiles_file" > "$tmp"
+
+  if cmp -s "$tmp" "$profiles_file"; then
+    rm -f "$tmp"
+    return 1
+  fi
+
+  cp -a "$profiles_file" "${profiles_file}.bak"
+  cp "$tmp" "$profiles_file"
+  rm -f "$tmp"
+
+  echo
+  echo "[$profiles_file] enabled http_default in default_ip_remediation (was commented out - backup at ${profiles_file}.bak)"
+  return 0
+}
+
+
 configure_otlp()
 {
   local url="$1"
@@ -795,6 +836,9 @@ configure_otlp()
   local skip_tls="false"
   [ "$insecure" = "yes" ] && skip_tls="true"
 
+  local profiles_changed="no"
+  enable_profile_notification && profiles_changed="yes"
+
   local headers_block=""
   local h
   for h in "${headers[@]}"; do
@@ -814,28 +858,37 @@ configure_otlp()
 
   local backup=""
   local existed="no"
+  local http_changed="yes"
 
   if [ -e "$HTTP_NOTIF_FILE" ]; then
     if cmp -s "$tmp" "$HTTP_NOTIF_FILE"; then
       echo
       echo "[$HTTP_NOTIF_FILE] unchanged"
       rm -f "$tmp"
-      return 0
+      http_changed="no"
     fi
 
-    backup=$(mktemp)
-    cp -a "$HTTP_NOTIF_FILE" "$backup"
-    existed="yes"
+    if [ "$http_changed" = "yes" ]; then
+      backup=$(mktemp)
+      cp -a "$HTTP_NOTIF_FILE" "$backup"
+      existed="yes"
+    fi
   fi
 
-  cp "$tmp" "$HTTP_NOTIF_FILE" || {
-    rm -f "$tmp" "$backup"
-    return 1
-  }
+  if [ "$http_changed" = "yes" ]; then
+    cp "$tmp" "$HTTP_NOTIF_FILE" || {
+      rm -f "$tmp" "$backup"
+      return 1
+    }
+  fi
   rm -f "$tmp"
 
+  if [ "$http_changed" = "no" ] && [ "$profiles_changed" = "no" ]; then
+    return 0
+  fi
+
   echo
-  echo "[$HTTP_NOTIF_FILE] updated"
+  [ "$http_changed" = "yes" ] && echo "[$HTTP_NOTIF_FILE] updated"
 
   if ! container_running; then
     echo
@@ -846,16 +899,23 @@ configure_otlp()
 
   # Notification plugin configs are only read at CrowdSec startup, not
   # hot-reloaded - confirmed live 2026-08-22 (a template fix silently kept
-  # rendering the old output until the container was restarted).
+  # rendering the old output until the container was restarted). Same
+  # applies to profiles.yaml's notification wiring, so any change to
+  # either file needs this same restart.
   echo
-  echo "Restarting crdsec-hub to apply (notification plugin config is only read at startup) ..."
+  echo "Restarting crdsec-hub to apply (config is only read at startup) ..."
 
   if ! compose restart crowdsec; then
     log_err "Restart failed. Restoring previous configuration."
-    if [ "$existed" = "yes" ]; then
-      cp -a "$backup" "$HTTP_NOTIF_FILE"
-    else
-      rm -f "$HTTP_NOTIF_FILE"
+    if [ "$http_changed" = "yes" ]; then
+      if [ "$existed" = "yes" ]; then
+        cp -a "$backup" "$HTTP_NOTIF_FILE"
+      else
+        rm -f "$HTTP_NOTIF_FILE"
+      fi
+    fi
+    if [ "$profiles_changed" = "yes" ]; then
+      cp -a "$(dirname "$0")/config/profiles.yaml.bak" "$(dirname "$0")/config/profiles.yaml"
     fi
     rm -f "$backup"
     return 1
@@ -865,6 +925,7 @@ configure_otlp()
 
   echo
   echo "OTLP endpoint configured: ${url}"
+  [ "$profiles_changed" = "yes" ] && echo "profiles.yaml: http_default enabled for default_ip_remediation (was commented out)."
   echo "Run '$0 testnotif' to send a test alert and verify delivery (this reaches the real endpoint - not run automatically here to avoid pushing a dummy record on every reconfigure)."
 }
 
