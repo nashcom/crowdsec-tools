@@ -18,7 +18,7 @@
 # See the License for the specific language governing permissions and     #
 # limitations under the License.                                          #
 #                                                                         #
-# Version 0.9.2                                                           #
+# Version 0.9.3                                                           #
 #                                                                         #
 # Install, configure and operate CrowdSec as a per-service brute-force /  #
 # auth-failure guard. Manages two components: "crowdsec" (detects,        #
@@ -29,7 +29,7 @@
 #                                                                         #
 ###########################################################################
 
-CRDSECTL_VERSION="0.9.2"
+CRDSECTL_VERSION="0.9.3"
 CRDSECTL_CONFIG_VERSION="1"
 
 CROWDSEC_SERVICE="crowdsec"
@@ -223,7 +223,6 @@ pkg_install()
       ;;
   esac
 }
-
 
 nsh_cmp()
 {
@@ -735,16 +734,9 @@ install_crowdsec()
     log_info "CrowdSec already installed."
   fi
 
-  # Debian's repo ships one crowdsec-firewall-bouncer package that covers
-  # nftables. RHEL/Fedora's repo still splits -iptables / -nftables variants;
-  # this project's scope is nftables, so pick that variant explicitly there.
-  local bouncer_package="crowdsec-firewall-bouncer"
-
-  case "$PKG_MGR" in
-    dnf|yum)
-      bouncer_package="crowdsec-firewall-bouncer-nftables"
-      ;;
-  esac
+  # Both apt and dnf/yum repos split -iptables / -nftables variants; this
+  # project's scope is nftables, so always pick that variant explicitly.
+  local bouncer_package="crowdsec-firewall-bouncer-nftables"
 
   pkg_update || return 1
 
@@ -1513,15 +1505,6 @@ test_block()
     printf "%-24s :  %s\n" "Firewall block" "FAILED"
     echo
 
-    # Real bug found live (2026-08-22): a crowdsec-firewall-bouncer build
-    # on one machine (same v0.0.36, but an older embedded Go toolchain
-    # than a working machine's build - GoVersion 1.22.2 vs 1.25.0) wrote
-    # decisions into nftables with their IPv4 octets reversed
-    # (2.3.4.10 -> 10.4.3.2). The decision itself was correct in
-    # "cscli decisions list" the whole time - only the bouncer's own
-    # nftables write was wrong. Checking for the reversed form here turns
-    # a generic "not found, go check journalctl" into an immediate,
-    # specific diagnosis instead of a manual investigation.
     local reversed_ip=""
     case "$ip" in
       *.*.*.*)
@@ -1531,12 +1514,12 @@ test_block()
 
     if [ -n "$reversed_ip" ] && $SUDO nft list ruleset | grep -q "$reversed_ip"; then
       echo "${ip} wasn't found, but ${reversed_ip} (its octets reversed) was."
-      echo "This looks like a crowdsec-firewall-bouncer bug writing decisions"
-      echo "into nftables with the IP byte-reversed, not a sync failure - the"
-      echo "decision itself is almost certainly correct (check with"
-      echo "\"crdsectl decisions\"). Compare \"crowdsec-firewall-bouncer -V\""
-      echo "against a machine where this works - a differing embedded"
-      echo "GoVersion is the one confirmed correlation so far."
+      echo "The decision itself is correct (check with \"crdsectl decisions\")."
+      echo "This is a known bug in the plain \"crowdsec-firewall-bouncer\""
+      echo "package (v0.0.25) - \"crdsectl install\" always installs the"
+      echo "dedicated \"crowdsec-firewall-bouncer-nftables\" package instead"
+      echo "(v0.0.36, unaffected), so re-running it should resolve this. If"
+      echo "it doesn't, this needs reporting upstream to CrowdSec."
     else
       echo "${ip} was not found in the nftables ruleset. Check:"
       echo "  systemctl status ${BOUNCER_SERVICE}"

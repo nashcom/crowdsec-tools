@@ -77,11 +77,8 @@ Three tiers of self-test, from least to most invasive:
   be verified inside a container (restricted netfilter access, even `--privileged` - WSL2 in particular) -
   `blocktest` detects this, skips the pointless wait, and instead confirms the decision itself via
   `cscli decisions list`, reporting "NOT VERIFIED (container)" for enforcement rather than a misleading "FAILED".
-  On a genuine failure, it also checks whether the IP's octets got reversed in nftables (`2.3.4.10` -> `10.4.3.2`) -
-  a real `crowdsec-firewall-bouncer` bug found live (2026-08-22), specific to one machine whose package build had
-  an older embedded Go toolchain (`GoVersion 1.22.2`) than a working machine's (`1.25.0`), same bouncer version
-  (`v0.0.36`) otherwise. The decision itself was correct the whole time; only the bouncer's nftables write was
-  wrong - `blocktest` now reports this distinctly instead of a generic "not found, go check journalctl."
+  On a genuine failure, it also checks whether the IP's octets got reversed in nftables (`2.3.4.10` -> `10.4.3.2`)
+  and reports that distinctly, with a specific fix, instead of a generic "not found, go check journalctl."
 - `crdsectl logtest [IP]` - the real thing: appends real synthetic log lines to the live output log and waits for CrowdSec to genuinely detect, parse, and score them on its own (log -> parser -> scenario -> decision -> bouncer -> nftables, nothing bypassed). Permanently adds lines to the real log file - not undoable.
 
 Alternatively, a piped remote install:
