@@ -18,7 +18,7 @@
 # See the License for the specific language governing permissions and     #
 # limitations under the License.                                          #
 #                                                                         #
-# Version 0.9.2                                                           #
+# Version 0.9.4                                                           #
 #                                                                         #
 # Purpose:                                                                #
 #                                                                         #
@@ -45,7 +45,7 @@
 #                                                                         #
 ###########################################################################
 
-CRDSEC_HUB_VERSION="0.9.2"
+CRDSEC_HUB_VERSION="0.9.4"
 
 CONTAINER_NAME="crdsec-hub"
 
@@ -143,7 +143,34 @@ bring_up()
   echo
   echo "Starting ${CONTAINER_NAME} via docker compose, publishing HTTPS port ${NGINX_HTTPS_PORT} (nginx) ..."
   echo
+  local profiles_file
+  profiles_file="$(dirname "$0")/config/profiles.yaml"
+  local fresh_config="no"
+  [ -e "$profiles_file" ] || fresh_config="yes"
+
   compose up -d || return 1
+
+  # Only apply the progressive-ban-by-default nudge on a genuinely fresh
+  # config (profiles.yaml didn't exist before this "up") - "up" is a
+  # routine command (reboots, host maintenance), unlike crdsectl's
+  # explicit "update", so re-asserting it on every single call would
+  # silently undo an admin's own choice far too often to be reasonable.
+  if [ "$fresh_config" = "yes" ]; then
+    # profiles.yaml is seeded by CrowdSec's own entrypoint into the
+    # (initially empty) bind-mounted config/ dir - usually near-instant,
+    # but give it a few seconds before giving up silently.
+    local waited=0
+    while [ ! -e "$profiles_file" ] && [ "$waited" -lt 5 ]; do
+      sleep 1
+      waited=$((waited + 1))
+    done
+
+    if enable_progressive_default; then
+      echo
+      echo "Restarting crowdsec to apply..."
+      compose restart crowdsec
+    fi
+  fi
 
   echo
   echo "Container is up. Run '$0 status' to check it, or '$0 shell' for a shell inside it."
@@ -195,6 +222,9 @@ show_status()
   printf "%-24s :  %s\n" "Hub host" "$HUB_HOST"
   printf "%-24s :  %s\n" "Hub HTTPS port (nginx)" "$NGINX_HTTPS_PORT"
   printf "%-24s :  %s\n" "Hub URL" "https://${HUB_HOST}:${NGINX_HTTPS_PORT}"
+  echo
+  printf "%-24s :  %s\n" "Default ban duration" "$(format_ban_duration || echo 'not set')"
+  printf "%-24s :  %s\n" "Progressive ban" "$(format_progressive_state || echo 'unknown')"
   echo
 }
 
@@ -758,6 +788,290 @@ enable_profile_notification()
 }
 
 
+# Ban duration / progressive ban. Applied to both default_ip_remediation and
+# default_range_remediation, kept in sync - unlike notifications above,
+# range-scoped decisions (e.g. from console/community blocklists) are a
+# real possibility here. A manual "profile" edit could still make them
+# diverge - the getters below report both and format_*() shows
+# "ip / range" whenever they differ, so a divergence is visible instead
+# of silently only showing the ip value.
+
+get_ban_duration_ip()
+{
+  local profiles_file
+  profiles_file="$(dirname "$0")/config/profiles.yaml"
+
+  [ -e "$profiles_file" ] || return 1
+  awk '
+    /^---$/ { found = 0 }
+    /^[[:space:]]*name:[[:space:]]*default_ip_remediation/ { found = 1 }
+    found && /^[[:space:]]*duration:/ { print $2; exit }
+  ' "$profiles_file"
+}
+
+
+get_ban_duration_range()
+{
+  local profiles_file
+  profiles_file="$(dirname "$0")/config/profiles.yaml"
+
+  [ -e "$profiles_file" ] || return 1
+  awk '
+    /^---$/ { found = 0 }
+    /^[[:space:]]*name:[[:space:]]*default_range_remediation/ { found = 1 }
+    found && /^[[:space:]]*duration:/ { print $2; exit }
+  ' "$profiles_file"
+}
+
+
+format_ban_duration()
+{
+  local ip_val range_val
+  ip_val=$(get_ban_duration_ip) || return 1
+  range_val=$(get_ban_duration_range)
+
+  if [ "$ip_val" = "$range_val" ]; then
+    echo "$ip_val"
+  else
+    echo "${ip_val} / ${range_val}"
+  fi
+}
+
+
+get_progressive_state_ip()
+{
+  local profiles_file
+  profiles_file="$(dirname "$0")/config/profiles.yaml"
+
+  [ -e "$profiles_file" ] || return 1
+
+  if awk '
+    /^---$/ { found = 0 }
+    /^[[:space:]]*name:[[:space:]]*default_ip_remediation/ { found = 1 }
+    found { print }
+  ' "$profiles_file" | grep -q '^duration_expr:'; then
+    echo "enabled"
+  else
+    echo "disabled"
+  fi
+}
+
+
+get_progressive_state_range()
+{
+  local profiles_file
+  profiles_file="$(dirname "$0")/config/profiles.yaml"
+
+  [ -e "$profiles_file" ] || return 1
+
+  if awk '
+    /^---$/ { found = 0 }
+    /^[[:space:]]*name:[[:space:]]*default_range_remediation/ { found = 1 }
+    found { print }
+  ' "$profiles_file" | grep -q '^duration_expr:'; then
+    echo "enabled"
+  else
+    echo "disabled"
+  fi
+}
+
+
+format_progressive_state()
+{
+  local ip_val range_val
+  ip_val=$(get_progressive_state_ip) || return 1
+  range_val=$(get_progressive_state_range)
+
+  if [ "$ip_val" = "$range_val" ]; then
+    echo "$ip_val"
+  else
+    echo "${ip_val} / ${range_val}"
+  fi
+}
+
+
+show_or_set_duration()
+{
+  local new_duration="$1"
+  local profiles_file
+  profiles_file="$(dirname "$0")/config/profiles.yaml"
+
+  if [ ! -e "$profiles_file" ]; then
+    log_err "${profiles_file} not found."
+    return 1
+  fi
+
+  if [ -z "$new_duration" ]; then
+    echo "Default ban duration: $(format_ban_duration)"
+    return 0
+  fi
+
+  if ! echo "$new_duration" | grep -Eq '^([0-9]+(h|m|s))+$'; then
+    log_err "Invalid duration '${new_duration}' - expected a golang duration like '4h', '30m', '1h30m'."
+    return 1
+  fi
+
+  local tmp
+  tmp=$(mktemp) || return 1
+
+  sed "s/^\([[:space:]]*duration: \).*/\1${new_duration}/" "$profiles_file" > "$tmp"
+
+  if cmp -s "$tmp" "$profiles_file"; then
+    rm -f "$tmp"
+    echo "Default ban duration is already ${new_duration}."
+    return 0
+  fi
+
+  cp -a "$profiles_file" "${profiles_file}.bak"
+  cp "$tmp" "$profiles_file"
+  rm -f "$tmp"
+
+  echo "Default ban duration set to ${new_duration} (backup: ${profiles_file}.bak)."
+  echo "Restarting crowdsec..."
+  compose restart crowdsec
+}
+
+
+show_or_set_progressive()
+{
+  local action="$1"
+  local profiles_file
+  profiles_file="$(dirname "$0")/config/profiles.yaml"
+
+  if [ ! -e "$profiles_file" ]; then
+    log_err "${profiles_file} not found."
+    return 1
+  fi
+
+  if [ -z "$action" ]; then
+    echo "Progressive ban: $(format_progressive_state)"
+    return 0
+  fi
+
+  case "$action" in
+    on|off) ;;
+    *)
+      log_err "Usage: $0 progressive [on|off]"
+      return 1
+      ;;
+  esac
+
+  local tmp
+  tmp=$(mktemp) || return 1
+
+  if [ "$action" = "on" ]; then
+    sed 's/^#duration_expr:/duration_expr:/' "$profiles_file" > "$tmp"
+  else
+    sed 's/^duration_expr:/#duration_expr:/' "$profiles_file" > "$tmp"
+  fi
+
+  if cmp -s "$tmp" "$profiles_file"; then
+    rm -f "$tmp"
+    echo "Progressive ban is already ${action}."
+    return 0
+  fi
+
+  cp -a "$profiles_file" "${profiles_file}.bak"
+  cp "$tmp" "$profiles_file"
+  rm -f "$tmp"
+
+  echo "Progressive ban turned ${action} (backup: ${profiles_file}.bak)."
+  echo "Restarting crowdsec..."
+  compose restart crowdsec
+}
+
+
+# Silent, non-restarting variant used by bring_up() to enforce progressive
+# ban as the shipped default on a genuinely fresh config only - bring_up()
+# only calls this when profiles.yaml didn't exist before "up" ran, since
+# "up" is routine (reboots, host maintenance) and re-asserting on every
+# call would silently undo an admin's own choice far too often. Only
+# touches duration_expr, never duration itself. Returns 0 if it changed
+# something (caller must restart), 1 otherwise.
+enable_progressive_default()
+{
+  local profiles_file
+  profiles_file="$(dirname "$0")/config/profiles.yaml"
+
+  [ -e "$profiles_file" ] || return 1
+
+  local tmp
+  tmp=$(mktemp) || return 1
+
+  sed 's/^#duration_expr:/duration_expr:/' "$profiles_file" > "$tmp"
+
+  if cmp -s "$tmp" "$profiles_file"; then
+    rm -f "$tmp"
+    return 1
+  fi
+
+  cp -a "$profiles_file" "${profiles_file}.bak"
+  cp "$tmp" "$profiles_file"
+  rm -f "$tmp"
+
+  echo "profiles.yaml: progressive ban enabled by default (was disabled - backup at ${profiles_file}.bak)."
+  return 0
+}
+
+
+edit_profiles()
+{
+  local profiles_file
+  profiles_file="$(dirname "$0")/config/profiles.yaml"
+
+  if [ ! -e "$profiles_file" ]; then
+    log_err "${profiles_file} not found."
+    return 1
+  fi
+
+  local editor="${EDITOR:-vi}"
+
+  if ! have_command "$editor"; then
+    log_err "Editor '${editor}' not found. Set \$EDITOR or install vi."
+    return 1
+  fi
+
+  local pre_edit
+  pre_edit=$(mktemp) || return 1
+  cp -a "$profiles_file" "$pre_edit"
+
+  "$editor" "$profiles_file"
+
+  if cmp -s "$pre_edit" "$profiles_file"; then
+    rm -f "$pre_edit"
+    echo "No changes made."
+    return 0
+  fi
+
+  # Only overwrite the persistent .bak once the edit is confirmed applied -
+  # it's the last-known-good config, not a scratch file, so a no-op or a
+  # failed restart must leave whatever backup was already there.
+  local backup="${profiles_file}.bak"
+
+  if ! container_running; then
+    cp -a "$pre_edit" "$backup"
+    rm -f "$pre_edit"
+    echo "profiles.yaml updated (backup: ${backup})."
+    echo "Hub is not running - this will take effect on the next '$0 up'."
+    return 0
+  fi
+
+  echo "Restarting crdsec-hub to apply (config is only read at startup) ..."
+
+  if ! compose restart crowdsec; then
+    log_err "Restart failed. Restoring previous configuration."
+    cp -a "$pre_edit" "$profiles_file"
+    rm -f "$pre_edit"
+    compose restart crowdsec
+    return 1
+  fi
+
+  cp -a "$pre_edit" "$backup"
+  rm -f "$pre_edit"
+  echo "profiles.yaml updated (backup: ${backup})."
+}
+
+
 configure_otlp()
 {
   local url="$1"
@@ -977,6 +1291,9 @@ show_help()
   printf "  %-24s%s\n" "bouncers" "List registered bouncers"
   printf "  %-24s%s\n" "otlp <url> [opts]" "Configure and apply the OTLP notification endpoint"
   printf "  %-24s%s\n" "testnotif [name]" "Send a test alert through a notification plugin (default: http_default)"
+  printf "  %-24s%s\n" "duration [value]" "Show or set the default ban duration (e.g. 4h)"
+  printf "  %-24s%s\n" "progressive [on|off]" "Show or set progressive (escalating) ban duration"
+  printf "  %-24s%s\n" "profile" "Open profiles.yaml in \$EDITOR (or vi) and restart"
   printf "  %-24s%s\n" "version" "Show version information"
   echo
 }
@@ -1071,6 +1388,18 @@ main()
 
     testnotif)
       test_notification "$2"
+      ;;
+
+    duration)
+      show_or_set_duration "$2"
+      ;;
+
+    progressive)
+      show_or_set_progressive "$2"
+      ;;
+
+    profile)
+      edit_profiles
       ;;
 
     version|-v|--version)

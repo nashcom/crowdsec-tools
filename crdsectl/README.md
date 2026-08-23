@@ -7,33 +7,36 @@ Domino (Internet password authentication failures) is the service implemented to
 
 Kept in sync with `crdsectl.sh help` - run that directly if this drifts.
 
-| Command                                         | Description                                                                 |
-|-------------------------------------------------|-----------------------------------------------------------------------------|
-| *(none)*                                        | Show CrowdSec status                                                        |
-| `help`                                          | Show this help                                                              |
-| `install [log-file] [token]`                    | Install CrowdSec, bouncer, service config, optional console enroll          |
-| `update [log-file]`                             | Update embedded CrowdSec configuration                                      |
-| `upgrade`                                       | Update the crdsectl script itself (from GitHub, or run a newer local file)  |
-| `test`                                          | Test configuration and parser                                               |
-| `status`                                        | Show CrowdSec status                                                        |
-| `alerts`                                        | List CrowdSec alerts                                                        |
-| `decisions`                                     | List active CrowdSec decisions                                              |
-| `metrics`                                       | Show CrowdSec metrics                                                       |
-| `collections`                                   | List installed CrowdSec collections                                         |
-| `enroll <token>`                                | Enroll this instance with the CrowdSec console (SaaS)                       |
-| `trust <ca-cert-path>`                          | Trust a self-hosted hub's CA (run before `register`, if needed)             |
-| `register <url> <login> <pw> <key>`             | Report to / consume decisions from a self-hosted hub (`--force` overwrites) |
-| `block <IP> [duration]`                         | Add a CrowdSec decision                                                     |
-| `unblock <IP>`                                  | Delete CrowdSec decisions for an IP                                         |
-| `blocktest [IP] [duration]`                     | Block a test IP and verify nftables (default 1.2.3.4, 10m)                  |
-| `logtest [IP]`                                  | Write real test log lines and verify the full log->decision pipeline        |
-| `firewall`                                      | Show CrowdSec nftables rules                                                |
-| `log [lines]`                                   | Show CrowdSec journal (default: 100 lines)                                  |
-| `reload`                                        | Validate and reload CrowdSec                                                |
-| `restart`                                       | Validate and restart CrowdSec and bouncer                                   |
-| `systemd [cmd]`                                 | Manage CrowdSec and bouncer services                                        |
-| `config`                                        | Show CrowdSec configuration                                                 |
-| `version`                                       | Show version information                                                    |
+| Command                                           | Description                                                                   |
+|---------------------------------------------------|-------------------------------------------------------------------------------|
+| *(none)*                                          | Show CrowdSec status                                                          |
+| `help`                                            | Show this help                                                                |
+| `install [log-file] [token]`                      | Install CrowdSec, bouncer, service config, optional console enroll            |
+| `update [log-file]`                               | Update embedded CrowdSec configuration                                        |
+| `upgrade`                                         | Update the crdsectl script itself (from GitHub, or run a newer local file)    |
+| `test`                                            | Test configuration and parser                                                 |
+| `status`                                          | Show CrowdSec status                                                          |
+| `alerts`                                          | List CrowdSec alerts                                                          |
+| `decisions`                                       | List active CrowdSec decisions                                                |
+| `metrics`                                         | Show CrowdSec metrics                                                         |
+| `collections`                                     | List installed CrowdSec collections                                           |
+| `enroll <token>`                                  | Enroll this instance with the CrowdSec console (SaaS)                         |
+| `trust <ca-cert-path>`                            | Trust a self-hosted hub's CA (run before `register`, if needed)               |
+| `register <url> <login> <pw> <key>`               | Report to / consume decisions from a self-hosted hub (`--force` overwrites)   |
+| `block <IP> [duration]`                           | Add a CrowdSec decision                                                       |
+| `unblock <IP>`                                    | Delete CrowdSec decisions for an IP                                           |
+| `blocktest [IP] [duration]`                       | Block a test IP and verify nftables (default 1.2.3.4, 10m)                    |
+| `logtest [IP]`                                    | Write real test log lines and verify the full log->decision pipeline          |
+| `duration [value]`                                | Show or set the default ban duration (e.g. 4h)                                |
+| `progressive [on\|off]`                           | Show or set progressive (escalating) ban duration                            |
+| `profile`                                         | Open profiles.yaml in $EDITOR (or vi), validate, and restart                  |
+| `firewall`                                        | Show CrowdSec nftables rules                                                  |
+| `log [lines]`                                     | Show CrowdSec journal (default: 100 lines)                                    |
+| `reload`                                          | Validate and reload CrowdSec                                                  |
+| `restart`                                         | Validate and restart CrowdSec and bouncer                                     |
+| `systemd [cmd]`                                   | Manage CrowdSec and bouncer services                                          |
+| `config`                                          | Show CrowdSec configuration                                                   |
+| `version`                                         | Show version information                                                      |
 
 ## Quick start
 
@@ -137,13 +140,39 @@ crdsectl blocktest [ip] [duration]  # self-test: adds a decision, confirms the b
 If this agent is registered against a hub, banning there also works and propagates to every other agent - see
 `../crdsec-hub/README.md`'s `ban`/`unban`.
 
+## Ban duration / progressive ban
+
+Both live in `/etc/crowdsec/profiles.yaml`, applied to both `default_ip_remediation` and `default_range_remediation`
+(kept in sync - range-scoped decisions are a real possibility here, e.g. from console/community blocklists, not just
+unused boilerplate):
+
+```bash
+crdsectl duration          # show the current default ban duration
+crdsectl duration 6h       # set it (golang duration format: 4h, 30m, 1h30m, ...)
+crdsectl progressive       # show whether progressive (escalating) ban duration is enabled
+crdsectl progressive on    # enable it - uses CrowdSec's own stock formula, unchanged:
+                            #   Sprintf('%dh', (GetDecisionsCount(Alert.GetValue()) + 1) * 4)
+                            #   (1st offense: base duration, 2nd: 2x, 3rd: 3x, ...)
+crdsectl progressive off   # disable it
+crdsectl profile           # open profiles.yaml directly in $EDITOR (or vi), validate, and restart
+```
+
+If the ip and range profiles have diverged (e.g. from a manual `profile` edit), `duration`/`progressive` with no
+argument shows both as `ip / range` instead of silently only reporting the ip value.
+
+`install` and `update` both enable progressive ban by default (base duration untouched) every time they run -
+including overriding an explicit `progressive off`, since there's no way to distinguish "still at CrowdSec's stock
+default" from "an admin deliberately turned it off" from the file content alone. If you don't want progressive ban,
+run `crdsectl progressive off` again after any `update`.
+
 ## Files
 
-| File                            | Purpose                                                                                                 |
-|---------------------------------|---------------------------------------------------------------------------------------------------------|
-| `crdsectl.sh`                   | The actual deliverable. Everything else here is test tooling for it.                                    |
-| `Dockerfile`                    | Ubuntu + systemd + dbus, for a real init system to exercise the systemctl/journalctl-backed commands.   |
-| `run-install-test-container.sh` | Builds and starts that test container.                                                                  |
+| File                              | Purpose                                                                                                   |
+|-----------------------------------|-----------------------------------------------------------------------------------------------------------|
+| --------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| `crdsectl.sh`                     | The actual deliverable. Everything else here is test tooling for it.                                      |
+| `Dockerfile`                      | Ubuntu + systemd + dbus, for a real init system to exercise the systemctl/journalctl-backed commands.     |
+| `run-install-test-container.sh`   | Builds and starts that test container.                                                                    |
 
 ## Testing
 

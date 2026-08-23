@@ -94,6 +94,9 @@ Kept in sync with `crdsec-hub.sh help` - run that directly if this drifts.
 | `bouncers`                    | List registered bouncers                                                                                                                    |
 | `otlp <url> [--insecure]`     | Configure and apply the OTLP notification endpoint                                                                                          |
 | `testnotif [name]`            | Send a test alert through a notification plugin (default: `http_default`)                                                                   |
+| `duration [value]`            | Show or set the default ban duration (e.g. 4h)                                                                                              |
+| `progressive [on\|off]`       | Show or set progressive (escalating) ban duration                                                                                            |
+| `profile`                     | Open profiles.yaml in $EDITOR (or vi) and restart                                                                                           |
 | `version`                     | Show version information                                                                                                                    |
 
 See the [root README](../README.md#hub-registration) for the registration flow diagram and an end-to-end example -
@@ -114,6 +117,17 @@ against this hub picks it up on its bouncer's next poll. Same underlying mechani
 decisions issued) - not each agent's parser/bucket metrics, since parsing happens on the agent that owns the log
 source, not here. For an agent's own local metrics, run `crdsectl metrics` on that agent - it queries its own local
 Prometheus endpoint regardless of whether it's registered against this hub or running standalone.
+
+`duration`/`progressive`/`profile` manage `config/profiles.yaml` - this is what actually governs ban policy for any
+agent *registered* against this hub (a standalone agent's own local `profiles.yaml` governs itself instead, see
+`../crdsectl/README.md`'s equivalent section, same commands). Applied to both `default_ip_remediation` and
+`default_range_remediation`, kept in sync - `duration`/`progressive` with no argument shows `ip / range` instead of
+silently only reporting the ip value if a manual `profile` edit ever made them diverge.
+
+`up` enables progressive ban by default (base duration untouched) on a genuinely fresh `config/profiles.yaml` only -
+unlike `../crdsectl`'s `install`/`update`, this does *not* re-run on every `up`, since `up` is a routine command
+(reboots, host maintenance) and re-asserting on every call would silently undo an admin's own explicit choice far
+too often to be reasonable.
 
 ## OpenTelemetry event export (OTLP)
 

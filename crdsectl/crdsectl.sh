@@ -18,7 +18,7 @@
 # See the License for the specific language governing permissions and     #
 # limitations under the License.                                          #
 #                                                                         #
-# Version 0.9.3                                                           #
+# Version 0.9.4                                                           #
 #                                                                         #
 # Install, configure and operate CrowdSec as a per-service brute-force /  #
 # auth-failure guard. Manages two components: "crowdsec" (detects,        #
@@ -29,7 +29,7 @@
 #                                                                         #
 ###########################################################################
 
-CRDSECTL_VERSION="0.9.3"
+CRDSECTL_VERSION="0.9.4"
 CRDSECTL_CONFIG_VERSION="1"
 
 CROWDSEC_SERVICE="crowdsec"
@@ -38,6 +38,7 @@ BOUNCER_SERVICE="crowdsec-firewall-bouncer"
 CROWDSEC_ACQUIS_DIR="/etc/crowdsec/acquis.d"
 CROWDSEC_PARSER_DIR="/etc/crowdsec/parsers/s01-parse"
 CROWDSEC_SCENARIO_DIR="/etc/crowdsec/scenarios"
+CROWDSEC_PROFILES_FILE="/etc/crowdsec/profiles.yaml"
 
 CRDSECTL_ACQUIS_FILE="${CROWDSEC_ACQUIS_DIR}/domino.yaml"
 CRDSECTL_PARSER_FILE="${CROWDSEC_PARSER_DIR}/domino-auth.yaml"
@@ -638,6 +639,10 @@ update_domino_config()
 
   rm -rf "$tmpdir"
 
+  if enable_progressive_default; then
+    changed=1
+  fi
+
   if [ "$changed" -eq 1 ]; then
     echo
     echo "CrowdSec configuration updated."
@@ -816,6 +821,272 @@ file_state()
 }
 
 
+###############################################################################
+# Ban duration / progressive ban (profiles.yaml). Applied to both
+# default_ip_remediation and default_range_remediation, kept in sync -
+# unlike notifications, range-scoped decisions (e.g. from console/
+# community blocklists) are a real possibility here, not just unused
+# boilerplate. duration/progressive keep both in sync, but a manual
+# "profile" edit could still make them diverge - the getters below report
+# both and format_*() shows "ip / range" whenever they differ, so a
+# divergence is visible instead of silently only showing the ip value.
+###############################################################################
+
+get_ban_duration_ip()
+{
+  $SUDO test -e "$CROWDSEC_PROFILES_FILE" || return 1
+  $SUDO awk '
+    /^---$/ { found = 0 }
+    /^[[:space:]]*name:[[:space:]]*default_ip_remediation/ { found = 1 }
+    found && /^[[:space:]]*duration:/ { print $2; exit }
+  ' "$CROWDSEC_PROFILES_FILE"
+}
+
+
+get_ban_duration_range()
+{
+  $SUDO test -e "$CROWDSEC_PROFILES_FILE" || return 1
+  $SUDO awk '
+    /^---$/ { found = 0 }
+    /^[[:space:]]*name:[[:space:]]*default_range_remediation/ { found = 1 }
+    found && /^[[:space:]]*duration:/ { print $2; exit }
+  ' "$CROWDSEC_PROFILES_FILE"
+}
+
+
+format_ban_duration()
+{
+  local ip_val range_val
+  ip_val=$(get_ban_duration_ip) || return 1
+  range_val=$(get_ban_duration_range)
+
+  if [ "$ip_val" = "$range_val" ]; then
+    echo "$ip_val"
+  else
+    echo "${ip_val} / ${range_val}"
+  fi
+}
+
+
+get_progressive_state_ip()
+{
+  $SUDO test -e "$CROWDSEC_PROFILES_FILE" || return 1
+
+  if $SUDO awk '
+    /^---$/ { found = 0 }
+    /^[[:space:]]*name:[[:space:]]*default_ip_remediation/ { found = 1 }
+    found { print }
+  ' "$CROWDSEC_PROFILES_FILE" | grep -q '^duration_expr:'; then
+    echo "enabled"
+  else
+    echo "disabled"
+  fi
+}
+
+
+get_progressive_state_range()
+{
+  $SUDO test -e "$CROWDSEC_PROFILES_FILE" || return 1
+
+  if $SUDO awk '
+    /^---$/ { found = 0 }
+    /^[[:space:]]*name:[[:space:]]*default_range_remediation/ { found = 1 }
+    found { print }
+  ' "$CROWDSEC_PROFILES_FILE" | grep -q '^duration_expr:'; then
+    echo "enabled"
+  else
+    echo "disabled"
+  fi
+}
+
+
+format_progressive_state()
+{
+  local ip_val range_val
+  ip_val=$(get_progressive_state_ip) || return 1
+  range_val=$(get_progressive_state_range)
+
+  if [ "$ip_val" = "$range_val" ]; then
+    echo "$ip_val"
+  else
+    echo "${ip_val} / ${range_val}"
+  fi
+}
+
+
+show_or_set_duration()
+{
+  local new_duration="$1"
+
+  if ! $SUDO test -e "$CROWDSEC_PROFILES_FILE"; then
+    log_err "${CROWDSEC_PROFILES_FILE} not found."
+    return 1
+  fi
+
+  if [ -z "$new_duration" ]; then
+    echo "Default ban duration: $(format_ban_duration)"
+    return 0
+  fi
+
+  require_root || return 1
+
+  if ! echo "$new_duration" | grep -Eq '^([0-9]+(h|m|s))+$'; then
+    log_err "Invalid duration '${new_duration}' - expected a golang duration like '4h', '30m', '1h30m'."
+    return 1
+  fi
+
+  local tmp
+  tmp=$(mktemp) || return 1
+
+  $SUDO sed "s/^\([[:space:]]*duration: \).*/\1${new_duration}/" "$CROWDSEC_PROFILES_FILE" > "$tmp"
+
+  if cmp -s "$tmp" "$CROWDSEC_PROFILES_FILE"; then
+    rm -f "$tmp"
+    echo "Default ban duration is already ${new_duration}."
+    return 0
+  fi
+
+  local backup="${CROWDSEC_PROFILES_FILE}.bak"
+  $SUDO cp -a "$CROWDSEC_PROFILES_FILE" "$backup"
+  $SUDO cp "$tmp" "$CROWDSEC_PROFILES_FILE"
+  rm -f "$tmp"
+
+  echo "Default ban duration set to ${new_duration} (backup: ${backup})."
+  echo "Restarting ${CROWDSEC_SERVICE}..."
+  $SUDO systemctl restart "$CROWDSEC_SERVICE"
+}
+
+
+# Silent, non-restarting variant used by update_domino_config() (and so
+# install_crowdsec(), which calls it) to enforce progressive ban as the
+# shipped default - re-asserted on every install/update, deliberately
+# overriding an explicit "progressive off" too (accepted tradeoff: no way
+# to tell "still at stock default" apart from "admin turned it off" from
+# file content alone). Only touches duration_expr, never duration itself.
+# Returns 0 if it changed something (caller must restart), 1 otherwise.
+enable_progressive_default()
+{
+  $SUDO test -e "$CROWDSEC_PROFILES_FILE" || return 1
+
+  local tmp
+  tmp=$(mktemp) || return 1
+
+  $SUDO sed 's/^#duration_expr:/duration_expr:/' "$CROWDSEC_PROFILES_FILE" > "$tmp"
+
+  if cmp -s "$tmp" "$CROWDSEC_PROFILES_FILE"; then
+    rm -f "$tmp"
+    return 1
+  fi
+
+  local backup="${CROWDSEC_PROFILES_FILE}.bak"
+  $SUDO cp -a "$CROWDSEC_PROFILES_FILE" "$backup"
+  $SUDO cp "$tmp" "$CROWDSEC_PROFILES_FILE"
+  rm -f "$tmp"
+
+  echo "profiles.yaml: progressive ban enabled by default (was disabled - backup at ${backup})."
+  return 0
+}
+
+
+show_or_set_progressive()
+{
+  local action="$1"
+
+  if ! $SUDO test -e "$CROWDSEC_PROFILES_FILE"; then
+    log_err "${CROWDSEC_PROFILES_FILE} not found."
+    return 1
+  fi
+
+  if [ -z "$action" ]; then
+    echo "Progressive ban: $(format_progressive_state)"
+    return 0
+  fi
+
+  case "$action" in
+    on|off) ;;
+    *)
+      log_err "Usage: crdsectl progressive [on|off]"
+      return 1
+      ;;
+  esac
+
+  require_root || return 1
+
+  local tmp
+  tmp=$(mktemp) || return 1
+
+  if [ "$action" = "on" ]; then
+    $SUDO sed 's/^#duration_expr:/duration_expr:/' "$CROWDSEC_PROFILES_FILE" > "$tmp"
+  else
+    $SUDO sed 's/^duration_expr:/#duration_expr:/' "$CROWDSEC_PROFILES_FILE" > "$tmp"
+  fi
+
+  if cmp -s "$tmp" "$CROWDSEC_PROFILES_FILE"; then
+    rm -f "$tmp"
+    echo "Progressive ban is already ${action}."
+    return 0
+  fi
+
+  local backup="${CROWDSEC_PROFILES_FILE}.bak"
+  $SUDO cp -a "$CROWDSEC_PROFILES_FILE" "$backup"
+  $SUDO cp "$tmp" "$CROWDSEC_PROFILES_FILE"
+  rm -f "$tmp"
+
+  echo "Progressive ban turned ${action} (backup: ${backup})."
+  echo "Restarting ${CROWDSEC_SERVICE}..."
+  $SUDO systemctl restart "$CROWDSEC_SERVICE"
+}
+
+
+edit_profiles()
+{
+  require_root || return 1
+
+  if ! $SUDO test -e "$CROWDSEC_PROFILES_FILE"; then
+    log_err "${CROWDSEC_PROFILES_FILE} not found."
+    return 1
+  fi
+
+  local editor="${EDITOR:-vi}"
+
+  if ! have_command "$editor"; then
+    log_err "Editor '${editor}' not found. Set \$EDITOR or install vi."
+    return 1
+  fi
+
+  local pre_edit
+  pre_edit=$(mktemp) || return 1
+  $SUDO cp -a "$CROWDSEC_PROFILES_FILE" "$pre_edit"
+
+  $SUDO "$editor" "$CROWDSEC_PROFILES_FILE"
+
+  if $SUDO cmp -s "$pre_edit" "$CROWDSEC_PROFILES_FILE"; then
+    rm -f "$pre_edit"
+    echo "No changes made."
+    return 0
+  fi
+
+  if ! $SUDO crowdsec -t >/dev/null 2>&1; then
+    log_err "New configuration failed validation - restoring previous version."
+    $SUDO cp -a "$pre_edit" "$CROWDSEC_PROFILES_FILE"
+    rm -f "$pre_edit"
+    $SUDO crowdsec -t
+    return 1
+  fi
+
+  # Only overwrite the persistent .bak once the edit is confirmed real and
+  # valid - it's the last-known-good config, not a scratch file, so a
+  # no-op or rejected edit must leave whatever backup was already there.
+  local backup="${CROWDSEC_PROFILES_FILE}.bak"
+  $SUDO cp -a "$pre_edit" "$backup"
+  rm -f "$pre_edit"
+
+  echo "profiles.yaml updated (backup: ${backup})."
+  echo "Restarting ${CROWDSEC_SERVICE}..."
+  $SUDO systemctl restart "$CROWDSEC_SERVICE"
+}
+
+
 show_status()
 {
   load_domino_config
@@ -851,6 +1122,11 @@ show_status()
     "Firewall bouncer" \
     "$(service_state "$BOUNCER_SERVICE")" \
     "$(enabled_state "$BOUNCER_SERVICE")"
+
+  echo
+
+  printf "%-24s :  %s\n" "Default ban duration" "$(format_ban_duration || echo 'not set')"
+  printf "%-24s :  %s\n" "Progressive ban" "$(format_progressive_state || echo 'unknown')"
 
   echo
 
@@ -1770,6 +2046,9 @@ show_help()
   printf "  %-37s%s\n" "unblock <IP>" "Delete CrowdSec decisions for an IP"
   printf "  %-37s%s\n" "blocktest [IP] [duration]" "Block a test IP and verify nftables (default 1.2.3.4, 10m)"
   printf "  %-37s%s\n" "logtest [IP]" "Write real test log lines and verify the full log->decision pipeline"
+  printf "  %-37s%s\n" "duration [value]" "Show or set the default ban duration (e.g. 4h)"
+  printf "  %-37s%s\n" "progressive [on|off]" "Show or set progressive (escalating) ban duration"
+  printf "  %-37s%s\n" "profile" "Open profiles.yaml in \$EDITOR (or vi), validate, and restart"
   printf "  %-37s%s\n" "firewall" "Show CrowdSec nftables rules"
   printf "  %-37s%s\n" "log [lines]" "Show CrowdSec journal (default: 100 lines)"
   printf "  %-37s%s\n" "reload" "Validate and reload CrowdSec"
@@ -1886,6 +2165,18 @@ main()
 
     logtest)
       test_log "$2"
+      ;;
+
+    duration)
+      show_or_set_duration "$2"
+      ;;
+
+    progressive)
+      show_or_set_progressive "$2"
+      ;;
+
+    profile)
+      edit_profiles
       ;;
 
     firewall)
