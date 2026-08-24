@@ -136,6 +136,18 @@ bring_up()
 {
   require_docker || return 1
 
+  # nginx hard-requires these to start - error clearly instead of letting
+  # it crash-loop, and don't auto-generate (gen-cert.sh is test-only).
+  local tls_dir
+  tls_dir="$(dirname "$0")/tls"
+
+  if [ ! -e "${tls_dir}/tls.crt" ] || [ ! -e "${tls_dir}/tls.key" ]; then
+    log_err "No TLS certificate found at ${tls_dir}/tls.crt."
+    echo "For local testing: $(dirname "$0")/gen-cert.sh" >&2
+    echo "For production: place a real CA-issued cert at ${tls_dir}/tls.crt + ${tls_dir}/tls.key (see ../nashcom-labs/lego for ACME automation)" >&2
+    return 1
+  fi
+
   # docker-compose.yml owns/creates crowdsec-net itself (not external:true)
   # - no manual pre-step needed here. It's shared with ../crdsectl/run-install-test-container.sh's
   # agent test container when that's run with NETWORK_MODE=bridge instead
@@ -229,13 +241,9 @@ show_status()
 
   echo "CrowdSec Central API:"
 
-  # DISABLE_ONLINE_API=true (docker-compose.yml) means this hub never
-  # auto-registers with CAPI - is_capi_registered() checks for a real
-  # "login:" line, not just file presence. sharing/pull are read directly
-  # from config.yaml via the already-tested get_capi_sharing()/
-  # get_capi_pull_state() rather than parsed from "cscli capi status"
-  # text - more reliable, and avoids attempting a live connection at all
-  # (which would just fail) when nothing is actually enabled to check.
+  # sharing/pull read from config.yaml directly rather than parsed from
+  # "cscli capi status" text, and a live connection is only attempted
+  # when something's actually enabled to check.
   if ! is_capi_registered; then
     printf "%-24s :  %s\n" "Connection" "disabled (not registered - run '$0 capi register')"
   else
@@ -1116,28 +1124,15 @@ edit_profiles()
 
 
 ###############################################################################
-# CAPI send/pull toggles (config/config.yaml's api.server.online_client
-# block). Real schema confirmed against CrowdSec's own Go source
-# (pkg/csconfig.OnlineApiClientCfg), not guessed from a doc summary:
+# CAPI send/pull toggles (config/config.yaml's api.server.online_client):
 #   online_client:
-#     sharing: true|false          # top-level, non-inverted (true = enabled)
+#     sharing: true|false      # non-inverted; defaults true when omitted
 #     pull:
-#       community: true|false      # nested under pull:
-#       blocklists: true|false     # nested under pull:
-# All three default to true (enabled) when omitted - confirmed live
-# 2026-08-24 against a real config.yaml with none of them present, where
-# "cscli capi status" still reported everything enabled. "sharing" and
-# "pull" are independently controllable in the schema, but "pull"'s two
-# children are deliberately always set together here (not exposed
-# separately) - "capi pull" always writes both community and blocklists
-# to the same value. Edits are scoped to lines strictly inside
-# online_client: (by indentation), not a blind key-name match -
-# "credentials_path" alone already appears twice in config.yaml (once
-# under api.client, once under api.server.online_client), confirmed live
-# 2026-08-24, so an unscoped match would be unsafe here in a way it
-# wasn't for the much smaller profiles.yaml. "online_client:" itself also
-# commonly has a trailing "# comment" in the real shipped config, so it's
-# matched by prefix only, no end anchor.
+#       community: true|false  # "capi pull" always sets both together
+#       blocklists: true|false
+# Edits are scoped to lines inside online_client: (by indentation), not a
+# blind key-name match - "credentials_path" also appears under api.client,
+# so an unscoped match would hit the wrong one.
 ###############################################################################
 
 get_capi_sharing()
@@ -1426,9 +1421,7 @@ show_or_set_capi_pull()
 }
 
 
-# A placeholder credentials file (real registrations always have a
-# "login:" line, freshly-registered or not) tells "genuinely never
-# registered" apart from other states here and in show_status().
+# Our own placeholder file has no "login:" line; real credentials always do.
 is_capi_registered()
 {
   local capi_creds
@@ -1448,23 +1441,34 @@ capi_register()
 
   echo "Registering with CrowdSec's Central API (CAPI)..."
 
-  local capi_creds
-  capi_creds="$(dirname "$0")/config/online_api_credentials.yaml"
-
-  # Mirrors the real Docker entrypoint's own registration line exactly
-  # (build/docker/docker_start.sh, confirmed live 2026-08-24):
-  # "cscli capi register" prints the new credentials to stdout, redirected
-  # straight to the config-referenced file - this container's own
-  # DISABLE_ONLINE_API=true (docker-compose.yml) means the entrypoint
-  # itself never does this automatically, so it's done here instead.
-  if ! dexec cscli capi register > "$capi_creds"; then
-    log_err "CAPI registration failed."
-    rm -f "$capi_creds"
+  # Doesn't call "cscli capi register" directly - with DISABLE_ONLINE_API
+  # true, config.yaml never gets an api.server.online_client section at
+  # all, since the entrypoint only creates it inside the same
+  # DISABLE_ONLINE_API-guarded block that also calls register. Recreating
+  # the container with DISABLE_ONLINE_API=false for one shot lets the
+  # entrypoint do both the config bootstrap and the registration itself,
+  # rather than reimplementing that by hand.
+  if ! DISABLE_ONLINE_API=false compose up -d --force-recreate crowdsec; then
+    log_err "Failed to recreate the crowdsec container for registration."
     return 1
   fi
 
+  if ! is_capi_registered; then
+    log_err "CAPI registration failed."
+    compose up -d --force-recreate crowdsec
+    return 1
+  fi
+
+  # Back to the persistent DISABLE_ONLINE_API=true default - credentials
+  # now exist, so the entrypoint's own "already has credentials_path"
+  # check means this won't re-register or lose anything.
+  compose up -d --force-recreate crowdsec
+
   # A manual opt-in should be a complete one, not require also running
-  # "capi send on"/"capi pull on" separately afterward.
+  # "capi send on"/"capi pull on" separately afterward. Low-level setters,
+  # not the show_or_set_* wrappers - no restart of their own, so one more
+  # explicit restart below actually applies them (the container was just
+  # recreated above, but that predates these config.yaml edits).
   set_capi_sharing true
   set_capi_pull true
 

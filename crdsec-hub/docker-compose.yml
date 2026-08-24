@@ -21,15 +21,14 @@ services:
 
     environment:
       COLLECTIONS: "${COLLECTIONS:-crowdsecurity/linux}"
-      # Off by default, matching ../crdsectl's own install (see its
-      # install_crowdsec()) - CAPI is a third-party data-sharing
-      # relationship, not something this tool should opt an install into
-      # without an explicit admin choice. Confirmed against the real
-      # Docker entrypoint source (2026-08-24, build/docker/docker_start.sh):
-      # only skips registration when this is true, checked before ever
-      # calling "cscli capi register". Opt in with "crdsec-hub.sh capi
-      # register" any time afterward.
-      DISABLE_ONLINE_API: "true"
+      # Off by default, matching ../crdsectl's own install - CAPI is a
+      # third-party data-sharing relationship, not something this tool
+      # should opt an install into without an explicit admin choice.
+      # Shell-overridable default (not hardcoded) so "crdsec-hub.sh capi
+      # register" can flip it to false for one container recreate,
+      # letting the entrypoint run its own registration logic, then flip
+      # it straight back.
+      DISABLE_ONLINE_API: "${DISABLE_ONLINE_API:-true}"
 
   nginx:
 

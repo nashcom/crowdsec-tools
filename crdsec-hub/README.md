@@ -64,7 +64,7 @@ real network path, or a production-issued (non-self-signed) certificate.
 
 ```bash
 cp env.example .env       # optional, only if you want non-default settings
-./gen-cert.sh        # populates tls/ - required before "up"
+./gen-cert.sh        # populates tls/ - required before "up" ("up" checks and errors clearly if missing)
 ./crdsec-hub.sh up
 ./crdsec-hub.sh register <name>   # register a remote crdsectl agent (machine + bouncer)
 ./crdsec-hub.sh status

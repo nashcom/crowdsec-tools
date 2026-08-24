@@ -752,28 +752,10 @@ install_crowdsec()
 
   pkg_update || return 1
 
-  # crdsectl deliberately does not opt into CrowdSec's Central API (CAPI)
-  # by default - unlike the local LAPI/bouncer registration just below,
-  # which is this tool's whole purpose, CAPI is a third-party data-sharing
-  # relationship (push your alerts, pull their blocklists) that should be
-  # an explicit admin choice, not an install-time default, and it's an
-  # external dependency this install path doesn't need to work at all. Run
-  # "crdsectl capi register" any time afterward to opt in for real.
-  #
-  # The skip mechanism genuinely differs by package manager - verified
-  # against CrowdSec's own upstream packaging source directly (NOT
-  # Debian's separately-maintained package, a real mistake caught live
-  # 2026-08-25 after it broke a real install: that one uses a file check,
-  # but it's a different maintainer/package from what install.crowdsec.net
-  # actually installs):
-  #   - apt (build/debian/postinst + templates): does NOT check the
-  #     credentials file at all - it overwrites it unconditionally and
-  #     decides registration from the "crowdsec/capi" debconf boolean
-  #     (defaults to true). Must preseed the debconf answer instead.
-  #   - dnf/yum (build/rpm/SPECS/crowdsec.spec): plain
-  #     "[ ! -f .../online_api_credentials.yaml ]" existence check - a
-  #     pre-created placeholder file genuinely does skip registration
-  #     here, unlike on apt.
+  # CAPI is off by default (opt in via "crdsectl capi register") - the
+  # skip mechanism differs by package manager: apt decides from the
+  # "crowdsec/capi" debconf boolean, dnf/yum from whether the credentials
+  # file already exists.
   if [ "$fresh_install" = "yes" ]; then
     case "$PKG_MGR" in
       apt)
@@ -1144,28 +1126,15 @@ edit_profiles()
 
 
 ###############################################################################
-# CAPI send/pull toggles (config.yaml's api.server.online_client block).
-# Real schema confirmed against CrowdSec's own Go source
-# (pkg/csconfig.OnlineApiClientCfg), not guessed from a doc summary:
+# CAPI send/pull toggles (config.yaml's api.server.online_client block):
 #   online_client:
-#     sharing: true|false          # top-level, non-inverted (true = enabled)
+#     sharing: true|false      # non-inverted; defaults true when omitted
 #     pull:
-#       community: true|false      # nested under pull:
-#       blocklists: true|false     # nested under pull:
-# All three default to true (enabled) when omitted - confirmed live
-# 2026-08-24 against a real config.yaml with none of them present, where
-# "cscli capi status" still reported everything enabled. "sharing" and
-# "pull" are independently controllable in the schema, but "pull"'s two
-# children are deliberately always set together here (not exposed
-# separately) - "capi pull" always writes both community and blocklists
-# to the same value. Edits are scoped to lines strictly inside
-# online_client: (by indentation), not a blind key-name match -
-# "credentials_path" alone already appears twice in config.yaml (once
-# under api.client, once under api.server.online_client), confirmed live
-# 2026-08-24, so an unscoped match would be unsafe here in a way it
-# wasn't for the much smaller profiles.yaml. "online_client:" itself also
-# commonly has a trailing "# comment" in the real shipped config, so it's
-# matched by prefix only, no end anchor.
+#       community: true|false  # "capi pull" always sets both together
+#       blocklists: true|false
+# Edits are scoped to lines inside online_client: (by indentation), not a
+# blind key-name match - "credentials_path" also appears under api.client,
+# so an unscoped match would hit the wrong one.
 ###############################################################################
 
 get_capi_sharing()
@@ -1446,12 +1415,7 @@ show_or_set_capi_pull()
 }
 
 
-# A placeholder credentials file (written by "install" to skip the
-# package's own auto-registration) is non-empty but has no "login:" line
-# - real credentials from "cscli capi register" always do. Used to tell
-# "genuinely never registered" apart from "deliberately skipped" here and
-# in show_status(), without depending on the file being absent (it never
-# is, once "install" has run).
+# Our own placeholder file has no "login:" line; real credentials always do.
 is_capi_registered()
 {
   local capi_creds="/etc/crowdsec/online_api_credentials.yaml"
@@ -1578,15 +1542,9 @@ show_status()
   echo
   echo "CrowdSec Central API:"
 
-  # "install" pre-creates a placeholder online_api_credentials.yaml to
-  # skip the package's own auto-registration (see install_crowdsec()) -
-  # the file always exists once installed, so file presence alone can't
-  # signal "not registered" the way it used to. is_capi_registered()
-  # checks for a real "login:" line instead. sharing/pull are read
-  # directly from config.yaml via the already-tested get_capi_sharing()/
-  # get_capi_pull_state() rather than parsed from "cscli capi status"
-  # text - more reliable, and avoids attempting a live connection at all
-  # (which would just fail) when nothing is actually enabled to check.
+  # sharing/pull read from config.yaml directly rather than parsed from
+  # "cscli capi status" text, and a live connection is only attempted
+  # when something's actually enabled to check.
   if ! is_capi_registered; then
     printf "%-24s :  %s\n" "Connection" "disabled (not registered - run 'crdsectl capi register')"
   else
