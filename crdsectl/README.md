@@ -30,6 +30,8 @@ Kept in sync with `crdsectl.sh help` - run that directly if this drifts.
 | `duration [value]`                                | Show or set the default ban duration (e.g. 4h)                                |
 | `progressive [on\|off]`                           | Show or set progressive (escalating) ban duration                            |
 | `profile`                                         | Open profiles.yaml in $EDITOR (or vi), validate, and restart                  |
+| `capi send\|pull [on\|off]`                       | Show or set CAPI signal sharing / blocklist pulling                          |
+| `capi register`                                   | Opt in to CrowdSec's Central API (off by default)                             |
 | `firewall`                                        | Show CrowdSec nftables rules                                                  |
 | `log [lines]`                                     | Show CrowdSec journal (default: 100 lines)                                    |
 | `reload`                                          | Validate and reload CrowdSec                                                  |
@@ -156,6 +158,30 @@ crdsectl progressive on    # enable it - uses CrowdSec's own stock formula, unch
 crdsectl progressive off   # disable it
 crdsectl profile           # open profiles.yaml directly in $EDITOR (or vi), validate, and restart
 ```
+
+## Central API (CAPI)
+
+CAPI is CrowdSec's own centralized cloud service, distinct from the LAPI (local API) that this agent's own
+`crowdsec` and bouncer talk to. LAPI is this instance's own decisions and enforcement; CAPI is the optional
+global CrowdSec network - pushing your own alerts up (`Signal sharing`) and pulling down the community blocklist
+and any Console-managed blocklists you've subscribed to.
+
+**Off by default.** The `crowdsec` package's own postinst auto-registers with CAPI unless
+`/etc/crowdsec/online_api_credentials.yaml` already exists and is non-empty (verified against Debian's actual
+postinst script) - `install` pre-creates a placeholder file for exactly that reason, so a fresh `crdsectl install`
+never registers with a third party without an explicit choice. Opt in any time afterward:
+
+```bash
+crdsectl capi register     # register for real, and enable sharing + pulling in one step
+crdsectl capi send on|off  # signal sharing only
+crdsectl capi pull on|off  # community + console blocklist pulling, always set together
+```
+
+`crdsectl status` includes a "CrowdSec Central API" block - `Connection`, `Signal sharing`, `Community blocklist`,
+`Console blocklists`. The three enabled/disabled fields are read directly from `config.yaml` (reliable), not
+parsed from `cscli capi status`'s plain-text output (it doesn't support `--output json`, confirmed live) - that
+command is only used for the live `Connection` check, and only attempted when something's actually enabled to
+check, so a genuinely disabled setup never shows a misleading `FAILED`/`unknown`.
 
 If the ip and range profiles have diverged (e.g. from a manual `profile` edit), `duration`/`progressive` with no
 argument shows both as `ip / range` instead of silently only reporting the ip value.

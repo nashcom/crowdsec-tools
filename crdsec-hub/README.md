@@ -97,6 +97,8 @@ Kept in sync with `crdsec-hub.sh help` - run that directly if this drifts.
 | `duration [value]`            | Show or set the default ban duration (e.g. 4h)                                                                                              |
 | `progressive [on\|off]`       | Show or set progressive (escalating) ban duration                                                                                            |
 | `profile`                     | Open profiles.yaml in $EDITOR (or vi) and restart                                                                                           |
+| `capi send\|pull [on\|off]`   | Show or set CAPI signal sharing / blocklist pulling                                                                                          |
+| `capi register`               | Opt in to CrowdSec's Central API (off by default)                                                                                            |
 | `version`                     | Show version information                                                                                                                    |
 
 See the [root README](../README.md#hub-registration) for the registration flow diagram and an end-to-end example -
@@ -128,6 +130,24 @@ silently only reporting the ip value if a manual `profile` edit ever made them d
 unlike `../crdsectl`'s `install`/`update`, this does *not* re-run on every `up`, since `up` is a routine command
 (reboots, host maintenance) and re-asserting on every call would silently undo an admin's own explicit choice far
 too often to be reasonable.
+
+**Off by default**, independent of any agent's own CAPI state (see `../crdsectl/README.md`'s equivalent section) -
+the hub and each agent each have their own separate CAPI registration. `docker-compose.yml` sets
+`DISABLE_ONLINE_API: "true"` on the `crowdsec` service, which the real Docker entrypoint checks before ever
+calling `cscli capi register` (verified against its actual source, `build/docker/docker_start.sh`) - so a fresh
+`up` never registers with a third party on its own. Opt in any time afterward:
+
+```bash
+crdsec-hub.sh capi register     # register for real, and enable sharing + pulling in one step
+crdsec-hub.sh capi send on|off  # signal sharing only
+crdsec-hub.sh capi pull on|off  # community + console blocklist pulling, always set together
+```
+
+`status` includes a "CrowdSec Central API" block - `Connection`, `Signal sharing`, `Community blocklist`,
+`Console blocklists`. The three enabled/disabled fields are read directly from `config.yaml` (reliable), not
+parsed from `cscli capi status`'s plain-text output (no `--output json` support, confirmed live) - that command
+is only used for the live `Connection` check, and only attempted when something's actually enabled to check, so a
+genuinely disabled hub never shows a misleading `FAILED`/`unknown`.
 
 ## OpenTelemetry event export (OTLP)
 

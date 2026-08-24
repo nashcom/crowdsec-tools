@@ -226,6 +226,49 @@ show_status()
   printf "%-24s :  %s\n" "Default ban duration" "$(format_ban_duration || echo 'not set')"
   printf "%-24s :  %s\n" "Progressive ban" "$(format_progressive_state || echo 'unknown')"
   echo
+
+  echo "CrowdSec Central API:"
+
+  # DISABLE_ONLINE_API=true (docker-compose.yml) means this hub never
+  # auto-registers with CAPI - is_capi_registered() checks for a real
+  # "login:" line, not just file presence. sharing/pull are read directly
+  # from config.yaml via the already-tested get_capi_sharing()/
+  # get_capi_pull_state() rather than parsed from "cscli capi status"
+  # text - more reliable, and avoids attempting a live connection at all
+  # (which would just fail) when nothing is actually enabled to check.
+  if ! is_capi_registered; then
+    printf "%-24s :  %s\n" "Connection" "disabled (not registered - run '$0 capi register')"
+  else
+    local sharing pull_raw pull_community pull_blocklists
+    sharing=$(get_capi_sharing)
+    pull_raw=$(get_capi_pull_state)
+    pull_community="${pull_raw%%|*}"
+    pull_blocklists="${pull_raw##*|}"
+
+    if [ "$sharing" = "true" ] || [ "$pull_community" = "true" ] || [ "$pull_blocklists" = "true" ]; then
+      local capi_output
+      capi_output=$(dexec cscli capi status 2>&1)
+
+      if echo "$capi_output" | grep -q "You can successfully interact with Central API"; then
+        printf "%-24s :  %s\n" "Connection" "OK"
+      elif echo "$capi_output" | grep -qiE "error|fail|unable|refused|timeout"; then
+        printf "%-24s :  %s\n" "Connection" "FAILED"
+      else
+        printf "%-24s :  %s\n" "Connection" "unknown (unexpected cscli output)"
+      fi
+    else
+      printf "%-24s :  %s\n" "Connection" "not attempted (sharing and pulling both disabled)"
+    fi
+
+    [ "$sharing" = "true" ] && printf "%-24s :  %s\n" "Signal sharing" "enabled" \
+      || printf "%-24s :  %s\n" "Signal sharing" "disabled"
+    [ "$pull_community" = "true" ] && printf "%-24s :  %s\n" "Community blocklist" "enabled" \
+      || printf "%-24s :  %s\n" "Community blocklist" "disabled"
+    [ "$pull_blocklists" = "true" ] && printf "%-24s :  %s\n" "Console blocklists" "enabled" \
+      || printf "%-24s :  %s\n" "Console blocklists" "disabled"
+  fi
+
+  echo
 }
 
 
@@ -1072,6 +1115,387 @@ edit_profiles()
 }
 
 
+###############################################################################
+# CAPI send/pull toggles (config/config.yaml's api.server.online_client
+# block). Real schema confirmed against CrowdSec's own Go source
+# (pkg/csconfig.OnlineApiClientCfg), not guessed from a doc summary:
+#   online_client:
+#     sharing: true|false          # top-level, non-inverted (true = enabled)
+#     pull:
+#       community: true|false      # nested under pull:
+#       blocklists: true|false     # nested under pull:
+# All three default to true (enabled) when omitted - confirmed live
+# 2026-08-24 against a real config.yaml with none of them present, where
+# "cscli capi status" still reported everything enabled. "sharing" and
+# "pull" are independently controllable in the schema, but "pull"'s two
+# children are deliberately always set together here (not exposed
+# separately) - "capi pull" always writes both community and blocklists
+# to the same value. Edits are scoped to lines strictly inside
+# online_client: (by indentation), not a blind key-name match -
+# "credentials_path" alone already appears twice in config.yaml (once
+# under api.client, once under api.server.online_client), confirmed live
+# 2026-08-24, so an unscoped match would be unsafe here in a way it
+# wasn't for the much smaller profiles.yaml. "online_client:" itself also
+# commonly has a trailing "# comment" in the real shipped config, so it's
+# matched by prefix only, no end anchor.
+###############################################################################
+
+get_capi_sharing()
+{
+  local config_file
+  config_file="$(dirname "$0")/config/config.yaml"
+
+  [ -e "$config_file" ] || return 1
+
+  awk '
+    {
+      match($0, /^[ ]*/)
+      indent = RLENGTH
+      stripped = $0
+      gsub(/^[ ]*/, "", stripped)
+    }
+    /^[[:space:]]*online_client:/ { in_block = 1; block_indent = indent; next }
+    in_block && stripped != "" && indent <= block_indent { in_block = 0 }
+    in_block && $0 ~ /^[[:space:]]*sharing:/ {
+      val = $0
+      sub(".*sharing:[[:space:]]*", "", val)
+      print val
+      found = 1
+      exit
+    }
+    END { if (!found) print "true" }
+  ' "$config_file"
+}
+
+
+set_capi_sharing()
+{
+  local value="$1"
+  local config_file
+  config_file="$(dirname "$0")/config/config.yaml"
+
+  local tmp
+  tmp=$(mktemp) || return 1
+
+  awk -v val="$value" '
+    {
+      match($0, /^[ ]*/)
+      indent = RLENGTH
+      stripped = $0
+      gsub(/^[ ]*/, "", stripped)
+    }
+    /^[[:space:]]*online_client:/ {
+      in_block = 1
+      block_indent = indent
+      print
+      next
+    }
+    in_block && stripped != "" && indent <= block_indent {
+      if (!found) {
+        pad = sprintf("%*s", block_indent + 2, "")
+        print pad "sharing: " val
+      }
+      in_block = 0
+    }
+    in_block && $0 ~ /^[[:space:]]*sharing:/ {
+      sub(/sharing:.*/, "sharing: " val)
+      found = 1
+      print
+      next
+    }
+    { print }
+    END {
+      if (in_block && !found) {
+        pad = sprintf("%*s", block_indent + 2, "")
+        print pad "sharing: " val
+      }
+    }
+  ' "$config_file" > "$tmp"
+
+  if cmp -s "$tmp" "$config_file"; then
+    rm -f "$tmp"
+    return 1
+  fi
+
+  cp -a "$config_file" "${config_file}.bak"
+  cp "$tmp" "$config_file"
+  rm -f "$tmp"
+}
+
+
+get_capi_pull_state()
+{
+  local config_file
+  config_file="$(dirname "$0")/config/config.yaml"
+
+  [ -e "$config_file" ] || return 1
+
+  awk '
+    {
+      match($0, /^[ ]*/)
+      indent = RLENGTH
+      stripped = $0
+      gsub(/^[ ]*/, "", stripped)
+    }
+    /^[[:space:]]*online_client:/ { in_oc = 1; oc_indent = indent; next }
+    in_pull && stripped != "" && indent <= pull_indent { in_pull = 0 }
+    in_oc && stripped != "" && indent <= oc_indent { in_oc = 0 }
+    in_oc && /^[[:space:]]*pull:/ { in_pull = 1; pull_indent = indent; next }
+    in_pull && $0 ~ /^[[:space:]]*community:/ {
+      v = $0; sub(".*community:[[:space:]]*", "", v); community = v; community_found = 1
+    }
+    in_pull && $0 ~ /^[[:space:]]*blocklists:/ {
+      v = $0; sub(".*blocklists:[[:space:]]*", "", v); blocklists = v; blocklists_found = 1
+    }
+    END {
+      if (!community_found) community = "true"
+      if (!blocklists_found) blocklists = "true"
+      print community "|" blocklists
+    }
+  ' "$config_file"
+}
+
+
+set_capi_pull()
+{
+  local value="$1"
+  local config_file
+  config_file="$(dirname "$0")/config/config.yaml"
+
+  local tmp
+  tmp=$(mktemp) || return 1
+
+  awk -v val="$value" '
+    {
+      match($0, /^[ ]*/)
+      indent = RLENGTH
+      stripped = $0
+      gsub(/^[ ]*/, "", stripped)
+    }
+    /^[[:space:]]*online_client:/ { in_oc = 1; oc_indent = indent; print; next }
+
+    in_pull && stripped != "" && indent <= pull_indent {
+      pad2 = sprintf("%*s", pull_indent + 2, "")
+      if (!found_community) print pad2 "community: " val
+      if (!found_blocklists) print pad2 "blocklists: " val
+      in_pull = 0
+    }
+
+    in_oc && stripped != "" && indent <= oc_indent {
+      if (!found_pull) {
+        pad1 = sprintf("%*s", oc_indent + 2, "")
+        pad2 = sprintf("%*s", oc_indent + 4, "")
+        print pad1 "pull:"
+        print pad2 "community: " val
+        print pad2 "blocklists: " val
+      }
+      in_oc = 0
+    }
+
+    in_oc && /^[[:space:]]*pull:/ { in_pull = 1; pull_indent = indent; found_pull = 1; print; next }
+
+    in_pull && $0 ~ /^[[:space:]]*community:/ {
+      sub(/community:.*/, "community: " val)
+      found_community = 1
+      print
+      next
+    }
+    in_pull && $0 ~ /^[[:space:]]*blocklists:/ {
+      sub(/blocklists:.*/, "blocklists: " val)
+      found_blocklists = 1
+      print
+      next
+    }
+    { print }
+    END {
+      if (in_pull) {
+        pad2 = sprintf("%*s", pull_indent + 2, "")
+        if (!found_community) print pad2 "community: " val
+        if (!found_blocklists) print pad2 "blocklists: " val
+      } else if (in_oc && !found_pull) {
+        pad1 = sprintf("%*s", oc_indent + 2, "")
+        pad2 = sprintf("%*s", oc_indent + 4, "")
+        print pad1 "pull:"
+        print pad2 "community: " val
+        print pad2 "blocklists: " val
+      }
+    }
+  ' "$config_file" > "$tmp"
+
+  if cmp -s "$tmp" "$config_file"; then
+    rm -f "$tmp"
+    return 1
+  fi
+
+  cp -a "$config_file" "${config_file}.bak"
+  cp "$tmp" "$config_file"
+  rm -f "$tmp"
+}
+
+
+show_or_set_capi_send()
+{
+  local action="$1"
+  local config_file
+  config_file="$(dirname "$0")/config/config.yaml"
+
+  if [ ! -e "$config_file" ]; then
+    log_err "${config_file} not found."
+    return 1
+  fi
+
+  if [ -z "$action" ]; then
+    case "$(get_capi_sharing)" in
+      true) echo "Signal sharing: enabled" ;;
+      false) echo "Signal sharing: disabled" ;;
+      *) echo "Signal sharing: unknown" ;;
+    esac
+    return 0
+  fi
+
+  case "$action" in
+    on|off) ;;
+    *)
+      log_err "Usage: $0 capi send [on|off]"
+      return 1
+      ;;
+  esac
+
+  local new_val
+  [ "$action" = "on" ] && new_val="true" || new_val="false"
+
+  if ! set_capi_sharing "$new_val"; then
+    echo "Signal sharing is already ${action}."
+    return 0
+  fi
+
+  echo "Signal sharing turned ${action} (backup: ${config_file}.bak)."
+  echo "Restarting crowdsec..."
+  compose restart crowdsec
+}
+
+
+show_or_set_capi_pull()
+{
+  local action="$1"
+  local config_file
+  config_file="$(dirname "$0")/config/config.yaml"
+
+  if [ ! -e "$config_file" ]; then
+    log_err "${config_file} not found."
+    return 1
+  fi
+
+  if [ -z "$action" ]; then
+    local raw community blocklists
+    raw=$(get_capi_pull_state)
+    community="${raw%%|*}"
+    blocklists="${raw##*|}"
+
+    local c_label b_label
+    [ "$community" = "true" ] && c_label="enabled" || c_label="disabled"
+    [ "$blocklists" = "true" ] && b_label="enabled" || b_label="disabled"
+
+    if [ "$c_label" = "$b_label" ]; then
+      echo "Pulling blocklists: ${c_label}"
+    else
+      echo "Pulling blocklists: community ${c_label} / console blocklists ${b_label}"
+    fi
+    return 0
+  fi
+
+  case "$action" in
+    on|off) ;;
+    *)
+      log_err "Usage: $0 capi pull [on|off]"
+      return 1
+      ;;
+  esac
+
+  local new_val
+  [ "$action" = "on" ] && new_val="true" || new_val="false"
+
+  if ! set_capi_pull "$new_val"; then
+    echo "Pulling blocklists is already ${action}."
+    return 0
+  fi
+
+  echo "Pulling blocklists turned ${action} (backup: ${config_file}.bak)."
+  echo "Restarting crowdsec..."
+  compose restart crowdsec
+}
+
+
+# A placeholder credentials file (real registrations always have a
+# "login:" line, freshly-registered or not) tells "genuinely never
+# registered" apart from other states here and in show_status().
+is_capi_registered()
+{
+  local capi_creds
+  capi_creds="$(dirname "$0")/config/online_api_credentials.yaml"
+  [ -e "$capi_creds" ] && grep -q "^login:" "$capi_creds" 2>/dev/null
+}
+
+
+capi_register()
+{
+  require_running_container || return 1
+
+  if is_capi_registered; then
+    echo "Already registered with Central API (CAPI)."
+    return 0
+  fi
+
+  echo "Registering with CrowdSec's Central API (CAPI)..."
+
+  local capi_creds
+  capi_creds="$(dirname "$0")/config/online_api_credentials.yaml"
+
+  # Mirrors the real Docker entrypoint's own registration line exactly
+  # (build/docker/docker_start.sh, confirmed live 2026-08-24):
+  # "cscli capi register" prints the new credentials to stdout, redirected
+  # straight to the config-referenced file - this container's own
+  # DISABLE_ONLINE_API=true (docker-compose.yml) means the entrypoint
+  # itself never does this automatically, so it's done here instead.
+  if ! dexec cscli capi register > "$capi_creds"; then
+    log_err "CAPI registration failed."
+    rm -f "$capi_creds"
+    return 1
+  fi
+
+  # A manual opt-in should be a complete one, not require also running
+  # "capi send on"/"capi pull on" separately afterward.
+  set_capi_sharing true
+  set_capi_pull true
+
+  echo "Registered. Restarting crowdsec..."
+  compose restart crowdsec
+}
+
+
+capi_command()
+{
+  local sub="$1"
+  local action="$2"
+
+  case "$sub" in
+    send)
+      show_or_set_capi_send "$action"
+      ;;
+    pull)
+      show_or_set_capi_pull "$action"
+      ;;
+    register)
+      capi_register
+      ;;
+    *)
+      log_err "Usage: $0 capi send|pull [on|off] | $0 capi register"
+      return 1
+      ;;
+  esac
+}
+
+
 configure_otlp()
 {
   local url="$1"
@@ -1275,10 +1699,10 @@ show_help()
   printf "  %-24s%s\n" "help" "Show this help"
   printf "  %-24s%s\n" "up" "Start the hub container (docker compose up -d)"
   printf "  %-24s%s\n" "down" "Stop the hub container (keeps data/config volumes)"
-  printf "  %-24s%s\n" "shell" "Open a shell inside the running container"
+  printf "  %-24s%s\n" "shell (bash)" "Open a shell inside the running container"
   printf "  %-24s%s\n" "status" "Show hub status"
-  printf "  %-24s%s\n" "alerts" "List CrowdSec alerts"
-  printf "  %-24s%s\n" "decisions" "List active CrowdSec decisions"
+  printf "  %-24s%s\n" "alerts (a)" "List CrowdSec alerts"
+  printf "  %-24s%s\n" "decisions (d)" "List active CrowdSec decisions"
   printf "  %-24s%s\n" "metrics" "Show hub CrowdSec metrics"
   printf "  %-24s%s\n" "log [lines]" "Show container log (default: 100 lines)"
   printf "  %-24s%s\n" "logs" "Show the full container log, no line limit"
@@ -1294,6 +1718,8 @@ show_help()
   printf "  %-24s%s\n" "duration [value]" "Show or set the default ban duration (e.g. 4h)"
   printf "  %-24s%s\n" "progressive [on|off]" "Show or set progressive (escalating) ban duration"
   printf "  %-24s%s\n" "profile" "Open profiles.yaml in \$EDITOR (or vi) and restart"
+  printf "  %-24s%s\n" "capi send|pull [on|off]" "Show or set CAPI signal sharing / blocklist pulling"
+  printf "  %-24s%s\n" "capi register" "Opt in to CrowdSec's Central API (off by default)"
   printf "  %-24s%s\n" "version" "Show version information"
   echo
 }
@@ -1322,7 +1748,7 @@ main()
       bring_down
       ;;
 
-    shell)
+    shell|bash)
       open_shell
       ;;
 
@@ -1330,11 +1756,11 @@ main()
       show_status
       ;;
 
-    alerts)
+    alerts|a)
       list_alerts
       ;;
 
-    decisions)
+    decisions|d)
       list_decisions
       ;;
 
@@ -1400,6 +1826,10 @@ main()
 
     profile)
       edit_profiles
+      ;;
+
+    capi)
+      capi_command "$2" "$3"
       ;;
 
     version|-v|--version)

@@ -39,6 +39,7 @@ CROWDSEC_ACQUIS_DIR="/etc/crowdsec/acquis.d"
 CROWDSEC_PARSER_DIR="/etc/crowdsec/parsers/s01-parse"
 CROWDSEC_SCENARIO_DIR="/etc/crowdsec/scenarios"
 CROWDSEC_PROFILES_FILE="/etc/crowdsec/profiles.yaml"
+CROWDSEC_CONFIG_FILE="/etc/crowdsec/config.yaml"
 
 CRDSECTL_ACQUIS_FILE="${CROWDSEC_ACQUIS_DIR}/domino.yaml"
 CRDSECTL_PARSER_FILE="${CROWDSEC_PARSER_DIR}/domino-auth.yaml"
@@ -705,7 +706,11 @@ install_crowdsec()
 
   install_self || return 1
 
+  local fresh_install="no"
+
   if ! have_command crowdsec || ! have_command cscli; then
+    fresh_install="yes"
+
     # Only checked here (fresh install) - once crowdsec is already
     # installed, whatever's listening on 8080 is expected to be crowdsec
     # itself, not a conflict, and a plain "install" re-run/update should
@@ -746,6 +751,41 @@ install_crowdsec()
   local bouncer_package="crowdsec-firewall-bouncer-nftables"
 
   pkg_update || return 1
+
+  # crdsectl deliberately does not opt into CrowdSec's Central API (CAPI)
+  # by default - unlike the local LAPI/bouncer registration just below,
+  # which is this tool's whole purpose, CAPI is a third-party data-sharing
+  # relationship (push your alerts, pull their blocklists) that should be
+  # an explicit admin choice, not an install-time default, and it's an
+  # external dependency this install path doesn't need to work at all. Run
+  # "crdsectl capi register" any time afterward to opt in for real.
+  #
+  # The skip mechanism genuinely differs by package manager - verified
+  # against CrowdSec's own upstream packaging source directly (NOT
+  # Debian's separately-maintained package, a real mistake caught live
+  # 2026-08-25 after it broke a real install: that one uses a file check,
+  # but it's a different maintainer/package from what install.crowdsec.net
+  # actually installs):
+  #   - apt (build/debian/postinst + templates): does NOT check the
+  #     credentials file at all - it overwrites it unconditionally and
+  #     decides registration from the "crowdsec/capi" debconf boolean
+  #     (defaults to true). Must preseed the debconf answer instead.
+  #   - dnf/yum (build/rpm/SPECS/crowdsec.spec): plain
+  #     "[ ! -f .../online_api_credentials.yaml ]" existence check - a
+  #     pre-created placeholder file genuinely does skip registration
+  #     here, unlike on apt.
+  if [ "$fresh_install" = "yes" ]; then
+    case "$PKG_MGR" in
+      apt)
+        export DEBIAN_FRONTEND=noninteractive
+        echo "crowdsec crowdsec/capi boolean false" | $SUDO debconf-set-selections
+        ;;
+      dnf|yum)
+        $SUDO mkdir -p /etc/crowdsec || return 1
+        echo "# CAPI registration skipped by crdsectl install - run 'crdsectl capi register' to opt in" | $SUDO tee /etc/crowdsec/online_api_credentials.yaml >/dev/null
+        ;;
+    esac
+  fi
 
   # Install and start crowdsec on its own first. The bouncer package's own
   # post-install step registers itself with crowdsec's local API - if
@@ -1103,6 +1143,376 @@ edit_profiles()
 }
 
 
+###############################################################################
+# CAPI send/pull toggles (config.yaml's api.server.online_client block).
+# Real schema confirmed against CrowdSec's own Go source
+# (pkg/csconfig.OnlineApiClientCfg), not guessed from a doc summary:
+#   online_client:
+#     sharing: true|false          # top-level, non-inverted (true = enabled)
+#     pull:
+#       community: true|false      # nested under pull:
+#       blocklists: true|false     # nested under pull:
+# All three default to true (enabled) when omitted - confirmed live
+# 2026-08-24 against a real config.yaml with none of them present, where
+# "cscli capi status" still reported everything enabled. "sharing" and
+# "pull" are independently controllable in the schema, but "pull"'s two
+# children are deliberately always set together here (not exposed
+# separately) - "capi pull" always writes both community and blocklists
+# to the same value. Edits are scoped to lines strictly inside
+# online_client: (by indentation), not a blind key-name match -
+# "credentials_path" alone already appears twice in config.yaml (once
+# under api.client, once under api.server.online_client), confirmed live
+# 2026-08-24, so an unscoped match would be unsafe here in a way it
+# wasn't for the much smaller profiles.yaml. "online_client:" itself also
+# commonly has a trailing "# comment" in the real shipped config, so it's
+# matched by prefix only, no end anchor.
+###############################################################################
+
+get_capi_sharing()
+{
+  $SUDO test -e "$CROWDSEC_CONFIG_FILE" || return 1
+
+  $SUDO awk '
+    {
+      match($0, /^[ ]*/)
+      indent = RLENGTH
+      stripped = $0
+      gsub(/^[ ]*/, "", stripped)
+    }
+    /^[[:space:]]*online_client:/ { in_block = 1; block_indent = indent; next }
+    in_block && stripped != "" && indent <= block_indent { in_block = 0 }
+    in_block && $0 ~ /^[[:space:]]*sharing:/ {
+      val = $0
+      sub(".*sharing:[[:space:]]*", "", val)
+      print val
+      found = 1
+      exit
+    }
+    END { if (!found) print "true" }
+  ' "$CROWDSEC_CONFIG_FILE"
+}
+
+
+set_capi_sharing()
+{
+  local value="$1"
+
+  local tmp
+  tmp=$(mktemp) || return 1
+
+  $SUDO awk -v val="$value" '
+    {
+      match($0, /^[ ]*/)
+      indent = RLENGTH
+      stripped = $0
+      gsub(/^[ ]*/, "", stripped)
+    }
+    /^[[:space:]]*online_client:/ {
+      in_block = 1
+      block_indent = indent
+      print
+      next
+    }
+    in_block && stripped != "" && indent <= block_indent {
+      if (!found) {
+        pad = sprintf("%*s", block_indent + 2, "")
+        print pad "sharing: " val
+      }
+      in_block = 0
+    }
+    in_block && $0 ~ /^[[:space:]]*sharing:/ {
+      sub(/sharing:.*/, "sharing: " val)
+      found = 1
+      print
+      next
+    }
+    { print }
+    END {
+      if (in_block && !found) {
+        pad = sprintf("%*s", block_indent + 2, "")
+        print pad "sharing: " val
+      }
+    }
+  ' "$CROWDSEC_CONFIG_FILE" > "$tmp"
+
+  if cmp -s "$tmp" "$CROWDSEC_CONFIG_FILE"; then
+    rm -f "$tmp"
+    return 1
+  fi
+
+  local backup="${CROWDSEC_CONFIG_FILE}.bak"
+  $SUDO cp -a "$CROWDSEC_CONFIG_FILE" "$backup"
+  $SUDO cp "$tmp" "$CROWDSEC_CONFIG_FILE"
+  rm -f "$tmp"
+}
+
+
+get_capi_pull_state()
+{
+  $SUDO test -e "$CROWDSEC_CONFIG_FILE" || return 1
+
+  $SUDO awk '
+    {
+      match($0, /^[ ]*/)
+      indent = RLENGTH
+      stripped = $0
+      gsub(/^[ ]*/, "", stripped)
+    }
+    /^[[:space:]]*online_client:/ { in_oc = 1; oc_indent = indent; next }
+    in_pull && stripped != "" && indent <= pull_indent { in_pull = 0 }
+    in_oc && stripped != "" && indent <= oc_indent { in_oc = 0 }
+    in_oc && /^[[:space:]]*pull:/ { in_pull = 1; pull_indent = indent; next }
+    in_pull && $0 ~ /^[[:space:]]*community:/ {
+      v = $0; sub(".*community:[[:space:]]*", "", v); community = v; community_found = 1
+    }
+    in_pull && $0 ~ /^[[:space:]]*blocklists:/ {
+      v = $0; sub(".*blocklists:[[:space:]]*", "", v); blocklists = v; blocklists_found = 1
+    }
+    END {
+      if (!community_found) community = "true"
+      if (!blocklists_found) blocklists = "true"
+      print community "|" blocklists
+    }
+  ' "$CROWDSEC_CONFIG_FILE"
+}
+
+
+set_capi_pull()
+{
+  local value="$1"
+
+  local tmp
+  tmp=$(mktemp) || return 1
+
+  $SUDO awk -v val="$value" '
+    {
+      match($0, /^[ ]*/)
+      indent = RLENGTH
+      stripped = $0
+      gsub(/^[ ]*/, "", stripped)
+    }
+    /^[[:space:]]*online_client:/ { in_oc = 1; oc_indent = indent; print; next }
+
+    in_pull && stripped != "" && indent <= pull_indent {
+      pad2 = sprintf("%*s", pull_indent + 2, "")
+      if (!found_community) print pad2 "community: " val
+      if (!found_blocklists) print pad2 "blocklists: " val
+      in_pull = 0
+    }
+
+    in_oc && stripped != "" && indent <= oc_indent {
+      if (!found_pull) {
+        pad1 = sprintf("%*s", oc_indent + 2, "")
+        pad2 = sprintf("%*s", oc_indent + 4, "")
+        print pad1 "pull:"
+        print pad2 "community: " val
+        print pad2 "blocklists: " val
+      }
+      in_oc = 0
+    }
+
+    in_oc && /^[[:space:]]*pull:/ { in_pull = 1; pull_indent = indent; found_pull = 1; print; next }
+
+    in_pull && $0 ~ /^[[:space:]]*community:/ {
+      sub(/community:.*/, "community: " val)
+      found_community = 1
+      print
+      next
+    }
+    in_pull && $0 ~ /^[[:space:]]*blocklists:/ {
+      sub(/blocklists:.*/, "blocklists: " val)
+      found_blocklists = 1
+      print
+      next
+    }
+    { print }
+    END {
+      if (in_pull) {
+        pad2 = sprintf("%*s", pull_indent + 2, "")
+        if (!found_community) print pad2 "community: " val
+        if (!found_blocklists) print pad2 "blocklists: " val
+      } else if (in_oc && !found_pull) {
+        pad1 = sprintf("%*s", oc_indent + 2, "")
+        pad2 = sprintf("%*s", oc_indent + 4, "")
+        print pad1 "pull:"
+        print pad2 "community: " val
+        print pad2 "blocklists: " val
+      }
+    }
+  ' "$CROWDSEC_CONFIG_FILE" > "$tmp"
+
+  if cmp -s "$tmp" "$CROWDSEC_CONFIG_FILE"; then
+    rm -f "$tmp"
+    return 1
+  fi
+
+  local backup="${CROWDSEC_CONFIG_FILE}.bak"
+  $SUDO cp -a "$CROWDSEC_CONFIG_FILE" "$backup"
+  $SUDO cp "$tmp" "$CROWDSEC_CONFIG_FILE"
+  rm -f "$tmp"
+}
+
+
+show_or_set_capi_send()
+{
+  local action="$1"
+
+  if ! $SUDO test -e "$CROWDSEC_CONFIG_FILE"; then
+    log_err "${CROWDSEC_CONFIG_FILE} not found."
+    return 1
+  fi
+
+  if [ -z "$action" ]; then
+    case "$(get_capi_sharing)" in
+      true) echo "Signal sharing: enabled" ;;
+      false) echo "Signal sharing: disabled" ;;
+      *) echo "Signal sharing: unknown" ;;
+    esac
+    return 0
+  fi
+
+  case "$action" in
+    on|off) ;;
+    *)
+      log_err "Usage: crdsectl capi send [on|off]"
+      return 1
+      ;;
+  esac
+
+  require_root || return 1
+
+  local new_val
+  [ "$action" = "on" ] && new_val="true" || new_val="false"
+
+  if ! set_capi_sharing "$new_val"; then
+    echo "Signal sharing is already ${action}."
+    return 0
+  fi
+
+  echo "Signal sharing turned ${action} (backup: ${CROWDSEC_CONFIG_FILE}.bak)."
+  echo "Restarting ${CROWDSEC_SERVICE}..."
+  $SUDO systemctl restart "$CROWDSEC_SERVICE"
+}
+
+
+show_or_set_capi_pull()
+{
+  local action="$1"
+
+  if ! $SUDO test -e "$CROWDSEC_CONFIG_FILE"; then
+    log_err "${CROWDSEC_CONFIG_FILE} not found."
+    return 1
+  fi
+
+  if [ -z "$action" ]; then
+    local raw community blocklists
+    raw=$(get_capi_pull_state)
+    community="${raw%%|*}"
+    blocklists="${raw##*|}"
+
+    local c_label b_label
+    [ "$community" = "true" ] && c_label="enabled" || c_label="disabled"
+    [ "$blocklists" = "true" ] && b_label="enabled" || b_label="disabled"
+
+    if [ "$c_label" = "$b_label" ]; then
+      echo "Pulling blocklists: ${c_label}"
+    else
+      echo "Pulling blocklists: community ${c_label} / console blocklists ${b_label}"
+    fi
+    return 0
+  fi
+
+  case "$action" in
+    on|off) ;;
+    *)
+      log_err "Usage: crdsectl capi pull [on|off]"
+      return 1
+      ;;
+  esac
+
+  require_root || return 1
+
+  local new_val
+  [ "$action" = "on" ] && new_val="true" || new_val="false"
+
+  if ! set_capi_pull "$new_val"; then
+    echo "Pulling blocklists is already ${action}."
+    return 0
+  fi
+
+  echo "Pulling blocklists turned ${action} (backup: ${CROWDSEC_CONFIG_FILE}.bak)."
+  echo "Restarting ${CROWDSEC_SERVICE}..."
+  $SUDO systemctl restart "$CROWDSEC_SERVICE"
+}
+
+
+# A placeholder credentials file (written by "install" to skip the
+# package's own auto-registration) is non-empty but has no "login:" line
+# - real credentials from "cscli capi register" always do. Used to tell
+# "genuinely never registered" apart from "deliberately skipped" here and
+# in show_status(), without depending on the file being absent (it never
+# is, once "install" has run).
+is_capi_registered()
+{
+  local capi_creds="/etc/crowdsec/online_api_credentials.yaml"
+  $SUDO test -e "$capi_creds" && $SUDO grep -q "^login:" "$capi_creds" 2>/dev/null
+}
+
+
+capi_register()
+{
+  require_root || return 1
+
+  if ! $SUDO test -e "$CROWDSEC_CONFIG_FILE"; then
+    log_err "CrowdSec doesn't appear to be installed (${CROWDSEC_CONFIG_FILE} not found)."
+    return 1
+  fi
+
+  if is_capi_registered; then
+    echo "Already registered with Central API (CAPI)."
+    return 0
+  fi
+
+  echo "Registering with CrowdSec's Central API (CAPI)..."
+
+  if ! $SUDO cscli capi register; then
+    log_err "CAPI registration failed."
+    return 1
+  fi
+
+  # A manual opt-in should be a complete one, not require also running
+  # "capi send on"/"capi pull on" separately afterward.
+  set_capi_sharing true
+  set_capi_pull true
+
+  echo "Registered. Restarting ${CROWDSEC_SERVICE}..."
+  $SUDO systemctl restart "$CROWDSEC_SERVICE"
+}
+
+
+capi_command()
+{
+  local sub="$1"
+  local action="$2"
+
+  case "$sub" in
+    send)
+      show_or_set_capi_send "$action"
+      ;;
+    pull)
+      show_or_set_capi_pull "$action"
+      ;;
+    register)
+      capi_register
+      ;;
+    *)
+      log_err "Usage: crdsectl capi send|pull [on|off] | crdsectl capi register"
+      return 1
+      ;;
+  esac
+}
+
+
 show_status()
 {
   load_domino_config
@@ -1166,6 +1576,51 @@ show_status()
   fi
 
   echo
+  echo "CrowdSec Central API:"
+
+  # "install" pre-creates a placeholder online_api_credentials.yaml to
+  # skip the package's own auto-registration (see install_crowdsec()) -
+  # the file always exists once installed, so file presence alone can't
+  # signal "not registered" the way it used to. is_capi_registered()
+  # checks for a real "login:" line instead. sharing/pull are read
+  # directly from config.yaml via the already-tested get_capi_sharing()/
+  # get_capi_pull_state() rather than parsed from "cscli capi status"
+  # text - more reliable, and avoids attempting a live connection at all
+  # (which would just fail) when nothing is actually enabled to check.
+  if ! is_capi_registered; then
+    printf "%-24s :  %s\n" "Connection" "disabled (not registered - run 'crdsectl capi register')"
+  else
+    local sharing pull_raw pull_community pull_blocklists
+    sharing=$(get_capi_sharing)
+    pull_raw=$(get_capi_pull_state)
+    pull_community="${pull_raw%%|*}"
+    pull_blocklists="${pull_raw##*|}"
+
+    if [ "$sharing" = "true" ] || [ "$pull_community" = "true" ] || [ "$pull_blocklists" = "true" ]; then
+      local capi_output
+      capi_output=$($SUDO cscli capi status 2>&1)
+
+      if echo "$capi_output" | grep -q "You can successfully interact with Central API"; then
+        printf "%-24s :  %s\n" "Connection" "OK"
+      elif echo "$capi_output" | grep -qiE "error|fail|unable|refused|timeout"; then
+        printf "%-24s :  %s\n" "Connection" "FAILED"
+      else
+        printf "%-24s :  %s\n" "Connection" "unknown (unexpected cscli output)"
+      fi
+    else
+      printf "%-24s :  %s\n" "Connection" "not attempted (sharing and pulling both disabled)"
+    fi
+
+    [ "$sharing" = "true" ] && printf "%-24s :  %s\n" "Signal sharing" "enabled" \
+      || printf "%-24s :  %s\n" "Signal sharing" "disabled"
+    [ "$pull_community" = "true" ] && printf "%-24s :  %s\n" "Community blocklist" "enabled" \
+      || printf "%-24s :  %s\n" "Community blocklist" "disabled"
+    [ "$pull_blocklists" = "true" ] && printf "%-24s :  %s\n" "Console blocklists" "enabled" \
+      || printf "%-24s :  %s\n" "Console blocklists" "disabled"
+  fi
+
+  echo
+  echo "Domino:"
 
   local configured_log
   configured_log=$(get_configured_output_log)
@@ -1188,15 +1643,25 @@ show_status()
     printf "%-24s :  %s\n" "Output log access" "NOT READABLE"
   fi
 
+  local acq_state parser_state scenario_state
+  acq_state=$(file_state "$CRDSECTL_ACQUIS_FILE")
+  parser_state=$(file_state "$CRDSECTL_PARSER_FILE")
+  scenario_state=$(file_state "$CRDSECTL_SCENARIO_FILE")
+
+  if [ "$acq_state" = "$parser_state" ] && [ "$parser_state" = "$scenario_state" ]; then
+    printf "%-24s :  %s\n" "Domino config" "$acq_state"
+  else
+    printf "%-24s :  %s\n" "Domino config" "Acquisition ${acq_state}, Parser ${parser_state}, Scenario ${scenario_state}"
+  fi
+
   echo
-  printf "%-24s :  %s\n" "Acquisition" "$(file_state "$CRDSECTL_ACQUIS_FILE")"
-  printf "%-24s :  %s\n" "Parser" "$(file_state "$CRDSECTL_PARSER_FILE")"
-  printf "%-24s :  %s\n" "Scenario" "$(file_state "$CRDSECTL_SCENARIO_FILE")"
-  printf "%-24s :  %s\n" "crdsectl command" "$(file_state "$CRDSECTL_INSTALL_PATH")"
 
   if have_command cscli; then
     local decisions
-    decisions=$(cscli decisions list -o raw 2>/dev/null | wc -l)
+    # "-o raw" is CSV with a header row (confirmed live 2026-08-24: "id,
+    # source,ip,reason,..." always printed first) - counting raw lines
+    # overcounted by one. Skip it before counting.
+    decisions=$(cscli decisions list -o raw 2>/dev/null | tail -n +2 | wc -l)
     printf "%-24s :  %s\n" "Active decisions" "$decisions"
   fi
 
@@ -2029,11 +2494,13 @@ show_config()
   else
     printf "%-24s :  %s\n" "Service configuration" "$DOMINO_CONFIG_FILE (not found - using default/override values)"
   fi
-  printf "%-24s :  %s\n" "Output log" "$DOMINO_OUTPUT_LOG"
   echo
+  echo "Domino:"
+  printf "%-24s :  %s\n" "Output log" "$DOMINO_OUTPUT_LOG"
   printf "%-24s :  %s\n" "Acquisition" "$CRDSECTL_ACQUIS_FILE"
   printf "%-24s :  %s\n" "Parser" "$CRDSECTL_PARSER_FILE"
   printf "%-24s :  %s\n" "Scenario" "$CRDSECTL_SCENARIO_FILE"
+  echo
   printf "%-24s :  %s\n" "crdsectl command" "$CRDSECTL_INSTALL_PATH"
   echo
 }
@@ -2065,8 +2532,8 @@ show_help()
   printf "  %-37s%s\n" "upgrade" "Update the crdsectl script itself (from GitHub, or run a newer local file directly)"
   printf "  %-37s%s\n" "test" "Test configuration and parser"
   printf "  %-37s%s\n" "status" "Show CrowdSec status"
-  printf "  %-37s%s\n" "alerts" "List CrowdSec alerts"
-  printf "  %-37s%s\n" "decisions" "List active CrowdSec decisions"
+  printf "  %-37s%s\n" "alerts (a)" "List CrowdSec alerts"
+  printf "  %-37s%s\n" "decisions (d)" "List active CrowdSec decisions"
   printf "  %-37s%s\n" "metrics" "Show CrowdSec metrics"
   printf "  %-37s%s\n" "collections" "List installed CrowdSec collections"
   printf "  %-37s%s\n" "enroll <token>" "Enroll this instance with the CrowdSec console"
@@ -2079,7 +2546,9 @@ show_help()
   printf "  %-37s%s\n" "duration [value]" "Show or set the default ban duration (e.g. 4h)"
   printf "  %-37s%s\n" "progressive [on|off]" "Show or set progressive (escalating) ban duration"
   printf "  %-37s%s\n" "profile" "Open profiles.yaml in \$EDITOR (or vi), validate, and restart"
-  printf "  %-37s%s\n" "firewall" "Show CrowdSec nftables rules"
+  printf "  %-37s%s\n" "capi send|pull [on|off]" "Show or set CAPI signal sharing / blocklist pulling"
+  printf "  %-37s%s\n" "capi register" "Opt in to CrowdSec's Central API (off by default)"
+  printf "  %-37s%s\n" "firewall (nft)" "Show CrowdSec nftables rules"
   printf "  %-37s%s\n" "log [lines]" "Show CrowdSec journal (default: 100 lines)"
   printf "  %-37s%s\n" "reload" "Validate and reload CrowdSec"
   printf "  %-37s%s\n" "restart" "Validate and restart CrowdSec and bouncer"
@@ -2152,11 +2621,11 @@ main()
       show_status
       ;;
 
-    alerts)
+    alerts|a)
       show_alerts
       ;;
 
-    decisions)
+    decisions|d)
       show_decisions
       ;;
 
@@ -2209,7 +2678,11 @@ main()
       edit_profiles
       ;;
 
-    firewall)
+    capi)
+      capi_command "$2" "$3"
+      ;;
+
+    firewall|nft)
       show_firewall
       ;;
 
