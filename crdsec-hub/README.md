@@ -133,9 +133,11 @@ too often to be reasonable.
 
 **Off by default**, independent of any agent's own CAPI state (see `../crdsectl/README.md`'s equivalent section) -
 the hub and each agent each have their own separate CAPI registration. `docker-compose.yml` sets
-`DISABLE_ONLINE_API: "true"` on the `crowdsec` service, which the real Docker entrypoint checks before ever
-calling `cscli capi register` (verified against its actual source, `build/docker/docker_start.sh`) - so a fresh
-`up` never registers with a third party on its own. Opt in any time afterward:
+`DISABLE_ONLINE_API: "${DISABLE_ONLINE_API:-true}"` on the `crowdsec` service - the real Docker entrypoint doesn't
+just skip registration when this is true, it actively deletes `api.server.online_client` from `config.yaml` on
+every container start, so a fresh `up` never registers on its own. `capi register` persists the override to
+`false` in `.env` (not just a one-shot environment override) precisely because that deletion happens on *every*
+start - a temporary override would just get wiped again on the next ordinary restart. Opt in any time afterward:
 
 ```bash
 crdsec-hub.sh capi register     # register for real, and enable sharing + pulling in one step

@@ -1441,28 +1441,44 @@ capi_register()
 
   echo "Registering with CrowdSec's Central API (CAPI)..."
 
-  # Doesn't call "cscli capi register" directly - with DISABLE_ONLINE_API
-  # true, config.yaml never gets an api.server.online_client section at
-  # all, since the entrypoint only creates it inside the same
-  # DISABLE_ONLINE_API-guarded block that also calls register. Recreating
-  # the container with DISABLE_ONLINE_API=false for one shot lets the
-  # entrypoint do both the config bootstrap and the registration itself,
-  # rather than reimplementing that by hand.
-  if ! DISABLE_ONLINE_API=false compose up -d --force-recreate crowdsec; then
+  # DISABLE_ONLINE_API=true doesn't just skip registration - the real
+  # entrypoint actively deletes api.server.online_client from config.yaml
+  # on every start where it's true. So this has to be a persistent change
+  # (written to .env, which docker-compose.yml reads), not a one-shot
+  # override - otherwise the next ordinary restart wipes it straight back
+  # out again.
+  if grep -q "^DISABLE_ONLINE_API=" "$ENV_FILE" 2>/dev/null; then
+    sed -i "s/^DISABLE_ONLINE_API=.*/DISABLE_ONLINE_API=false/" "$ENV_FILE"
+  else
+    echo "DISABLE_ONLINE_API=false" >> "$ENV_FILE"
+  fi
+  echo "[${ENV_FILE}] DISABLE_ONLINE_API=false"
+
+  echo "Recreating the crowdsec container to apply..."
+  if ! compose up -d --force-recreate crowdsec; then
     log_err "Failed to recreate the crowdsec container for registration."
     return 1
   fi
 
+  # The container reporting "started" doesn't mean the entrypoint's own
+  # registration call (a real network round trip) has finished yet.
+  echo "Waiting for registration to complete..."
+  local waited=0
+  while ! is_capi_registered && [ "$waited" -lt 20 ]; do
+    sleep 1
+    waited=$((waited + 1))
+  done
+
   if ! is_capi_registered; then
-    log_err "CAPI registration failed."
+    log_err "CAPI registration failed after ${waited}s."
+    echo "[${ENV_FILE}] reverting to DISABLE_ONLINE_API=true"
+    sed -i "s/^DISABLE_ONLINE_API=.*/DISABLE_ONLINE_API=true/" "$ENV_FILE"
+    echo "Recreating the crowdsec container to apply..."
     compose up -d --force-recreate crowdsec
     return 1
   fi
 
-  # Back to the persistent DISABLE_ONLINE_API=true default - credentials
-  # now exist, so the entrypoint's own "already has credentials_path"
-  # check means this won't re-register or lose anything.
-  compose up -d --force-recreate crowdsec
+  echo "Registration confirmed after ${waited}s."
 
   # A manual opt-in should be a complete one, not require also running
   # "capi send on"/"capi pull on" separately afterward. Low-level setters,

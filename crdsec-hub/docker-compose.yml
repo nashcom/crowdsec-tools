@@ -24,10 +24,11 @@ services:
       # Off by default, matching ../crdsectl's own install - CAPI is a
       # third-party data-sharing relationship, not something this tool
       # should opt an install into without an explicit admin choice.
-      # Shell-overridable default (not hardcoded) so "crdsec-hub.sh capi
-      # register" can flip it to false for one container recreate,
-      # letting the entrypoint run its own registration logic, then flip
-      # it straight back.
+      # Shell/`.env`-overridable default (not hardcoded): the entrypoint
+      # deletes api.server.online_client on every start where this is
+      # true, so "crdsec-hub.sh capi register" persists false to .env
+      # rather than a one-shot override, which would just get wiped again
+      # on the next ordinary restart.
       DISABLE_ONLINE_API: "${DISABLE_ONLINE_API:-true}"
 
   nginx:
