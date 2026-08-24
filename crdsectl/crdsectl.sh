@@ -568,86 +568,97 @@ update_domino_config()
     return 1
   fi
 
-  local tmpdir
-  tmpdir=$(mktemp -d) || return 1
-
-  local acquis_tmp="${tmpdir}/domino.yaml"
-  local parser_tmp="${tmpdir}/domino-auth.yaml"
-  local scenario_tmp="${tmpdir}/domino-auth-bf.yaml"
-
-  generate_acquisition > "$acquis_tmp"
-  generate_parser > "$parser_tmp"
-  generate_scenario > "$scenario_tmp"
-
-  $SUDO mkdir -p "$CROWDSEC_ACQUIS_DIR" \
-          "$CROWDSEC_PARSER_DIR" \
-          "$CROWDSEC_SCENARIO_DIR" || {
-    rm -rf "$tmpdir"
-    return 1
-  }
-
-  local backup_dir="${tmpdir}/backup"
-  mkdir -p "$backup_dir"
-
-  local acquis_existed="no"
-  local parser_existed="no"
-  local scenario_existed="no"
-
-  make_backup "$CRDSECTL_ACQUIS_FILE" "${backup_dir}/domino.yaml"
-  [ $? -eq 0 ] && acquis_existed="yes"
-
-  make_backup "$CRDSECTL_PARSER_FILE" "${backup_dir}/domino-auth.yaml"
-  [ $? -eq 0 ] && parser_existed="yes"
-
-  make_backup "$CRDSECTL_SCENARIO_FILE" "${backup_dir}/domino-auth-bf.yaml"
-  [ $? -eq 0 ] && scenario_existed="yes"
-
   local changed=0
-  local rc
 
-  install_generated_file "$acquis_tmp" "$CRDSECTL_ACQUIS_FILE"
-  rc=$?
-  [ $rc -eq 2 ] && changed=1
-  if [ $rc -ne 0 ] && [ $rc -ne 2 ]; then
-    rm -rf "$tmpdir"
-    return 1
-  fi
-
-  install_generated_file "$parser_tmp" "$CRDSECTL_PARSER_FILE"
-  rc=$?
-  [ $rc -eq 2 ] && changed=1
-  if [ $rc -ne 0 ] && [ $rc -ne 2 ]; then
-    restore_file "$CRDSECTL_ACQUIS_FILE" "${backup_dir}/domino.yaml" "$acquis_existed"
-    rm -rf "$tmpdir"
-    return 1
-  fi
-
-  install_generated_file "$scenario_tmp" "$CRDSECTL_SCENARIO_FILE"
-  rc=$?
-  [ $rc -eq 2 ] && changed=1
-  if [ $rc -ne 0 ] && [ $rc -ne 2 ]; then
-    restore_file "$CRDSECTL_ACQUIS_FILE" "${backup_dir}/domino.yaml" "$acquis_existed"
-    restore_file "$CRDSECTL_PARSER_FILE" "${backup_dir}/domino-auth.yaml" "$parser_existed"
-    rm -rf "$tmpdir"
-    return 1
-  fi
-
-  echo
-  echo "Validating CrowdSec configuration..."
-
-  if ! $SUDO crowdsec -t; then
+  # Domino not installed on this host yet (eg crdsectl installed ahead of
+  # Domino itself) - skip wiring up the acquisition/parser/scenario, rather
+  # than pointing them at a log that doesn't exist. Re-running 'update'
+  # once Domino is there picks it up; leaves any already-installed files
+  # untouched either way.
+  if [ ! -r "$DOMINO_OUTPUT_LOG" ]; then
     echo
-    log_err "CrowdSec configuration validation failed. Restoring previous configuration."
+    echo "Domino output log (${DOMINO_OUTPUT_LOG}) not found or not readable - skipping Domino acquisition/parser/scenario setup. Run 'crdsectl update' once Domino is installed."
+  else
+    local tmpdir
+    tmpdir=$(mktemp -d) || return 1
 
-    restore_file "$CRDSECTL_ACQUIS_FILE" "${backup_dir}/domino.yaml" "$acquis_existed"
-    restore_file "$CRDSECTL_PARSER_FILE" "${backup_dir}/domino-auth.yaml" "$parser_existed"
-    restore_file "$CRDSECTL_SCENARIO_FILE" "${backup_dir}/domino-auth-bf.yaml" "$scenario_existed"
+    local acquis_tmp="${tmpdir}/domino.yaml"
+    local parser_tmp="${tmpdir}/domino-auth.yaml"
+    local scenario_tmp="${tmpdir}/domino-auth-bf.yaml"
+
+    generate_acquisition > "$acquis_tmp"
+    generate_parser > "$parser_tmp"
+    generate_scenario > "$scenario_tmp"
+
+    $SUDO mkdir -p "$CROWDSEC_ACQUIS_DIR" \
+            "$CROWDSEC_PARSER_DIR" \
+            "$CROWDSEC_SCENARIO_DIR" || {
+      rm -rf "$tmpdir"
+      return 1
+    }
+
+    local backup_dir="${tmpdir}/backup"
+    mkdir -p "$backup_dir"
+
+    local acquis_existed="no"
+    local parser_existed="no"
+    local scenario_existed="no"
+
+    make_backup "$CRDSECTL_ACQUIS_FILE" "${backup_dir}/domino.yaml"
+    [ $? -eq 0 ] && acquis_existed="yes"
+
+    make_backup "$CRDSECTL_PARSER_FILE" "${backup_dir}/domino-auth.yaml"
+    [ $? -eq 0 ] && parser_existed="yes"
+
+    make_backup "$CRDSECTL_SCENARIO_FILE" "${backup_dir}/domino-auth-bf.yaml"
+    [ $? -eq 0 ] && scenario_existed="yes"
+
+    local rc
+
+    install_generated_file "$acquis_tmp" "$CRDSECTL_ACQUIS_FILE"
+    rc=$?
+    [ $rc -eq 2 ] && changed=1
+    if [ $rc -ne 0 ] && [ $rc -ne 2 ]; then
+      rm -rf "$tmpdir"
+      return 1
+    fi
+
+    install_generated_file "$parser_tmp" "$CRDSECTL_PARSER_FILE"
+    rc=$?
+    [ $rc -eq 2 ] && changed=1
+    if [ $rc -ne 0 ] && [ $rc -ne 2 ]; then
+      restore_file "$CRDSECTL_ACQUIS_FILE" "${backup_dir}/domino.yaml" "$acquis_existed"
+      rm -rf "$tmpdir"
+      return 1
+    fi
+
+    install_generated_file "$scenario_tmp" "$CRDSECTL_SCENARIO_FILE"
+    rc=$?
+    [ $rc -eq 2 ] && changed=1
+    if [ $rc -ne 0 ] && [ $rc -ne 2 ]; then
+      restore_file "$CRDSECTL_ACQUIS_FILE" "${backup_dir}/domino.yaml" "$acquis_existed"
+      restore_file "$CRDSECTL_PARSER_FILE" "${backup_dir}/domino-auth.yaml" "$parser_existed"
+      rm -rf "$tmpdir"
+      return 1
+    fi
+
+    echo
+    echo "Validating CrowdSec configuration..."
+
+    if ! $SUDO crowdsec -t; then
+      echo
+      log_err "CrowdSec configuration validation failed. Restoring previous configuration."
+
+      restore_file "$CRDSECTL_ACQUIS_FILE" "${backup_dir}/domino.yaml" "$acquis_existed"
+      restore_file "$CRDSECTL_PARSER_FILE" "${backup_dir}/domino-auth.yaml" "$parser_existed"
+      restore_file "$CRDSECTL_SCENARIO_FILE" "${backup_dir}/domino-auth-bf.yaml" "$scenario_existed"
+
+      rm -rf "$tmpdir"
+      return 1
+    fi
 
     rm -rf "$tmpdir"
-    return 1
   fi
-
-  rm -rf "$tmpdir"
 
   if enable_progressive_default; then
     changed=1
