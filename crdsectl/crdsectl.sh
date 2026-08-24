@@ -18,7 +18,7 @@
 # See the License for the specific language governing permissions and     #
 # limitations under the License.                                          #
 #                                                                         #
-# Version 0.9.5                                                           #
+# Version 0.9.6                                                           #
 #                                                                         #
 # Install, configure and operate CrowdSec as a per-service brute-force /  #
 # auth-failure guard. Manages two components: "crowdsec" (detects,        #
@@ -29,7 +29,7 @@
 #                                                                         #
 ###########################################################################
 
-CRDSECTL_VERSION="0.9.5"
+CRDSECTL_VERSION="0.9.6"
 CRDSECTL_CONFIG_VERSION="1"
 
 CROWDSEC_SERVICE="crowdsec"
