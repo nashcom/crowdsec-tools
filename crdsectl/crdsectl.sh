@@ -18,7 +18,7 @@
 # See the License for the specific language governing permissions and     #
 # limitations under the License.                                          #
 #                                                                         #
-# Version 0.9.6                                                           #
+# Version 0.9.7                                                           #
 #                                                                         #
 # Install, configure and operate CrowdSec as a per-service brute-force /  #
 # auth-failure guard. Manages two components: "crowdsec" (detects,        #
@@ -29,7 +29,7 @@
 #                                                                         #
 ###########################################################################
 
-CRDSECTL_VERSION="0.9.6"
+CRDSECTL_VERSION="0.9.7"
 CRDSECTL_CONFIG_VERSION="1"
 
 CROWDSEC_SERVICE="crowdsec"
@@ -236,16 +236,23 @@ nsh_cmp()
     return 1
   fi
 
+  # Third arg "sudo" reads via $SUDO - only needed when a file was cp -a'd
+  # from a root-owned source with restrictive permissions (e.g. edit_profiles'
+  # pre_edit snapshot). Most callers compare world-readable config files and
+  # don't need it.
+  local reader=""
+  [ "$3" = "sudo" ] && reader="$SUDO"
+
   if have_command cmp; then
-    cmp -s "$1" "$2"
+    $reader cmp -s "$1" "$2"
     return $?
   fi
 
   local hash1
   local hash2
 
-  hash1=$(sha256sum "$1" | cut -d" " -f1)
-  hash2=$(sha256sum "$2" | cut -d" " -f1)
+  hash1=$($reader sha256sum "$1" | cut -d" " -f1)
+  hash2=$($reader sha256sum "$2" | cut -d" " -f1)
 
   [ "$hash1" = "$hash2" ]
 }
@@ -725,6 +732,9 @@ install_crowdsec()
       pkg_install curl || return 1
     fi
 
+    # Not fatal if this fails - nsh_cmp() falls back to sha256sum without it.
+    have_command cmp || pkg_install diffutils
+
     local install_script
     install_script=$(mktemp) || return 1
 
@@ -978,7 +988,7 @@ show_or_set_duration()
 
   $SUDO sed "s/^\([[:space:]]*duration: \).*/\1${new_duration}/" "$CROWDSEC_PROFILES_FILE" > "$tmp"
 
-  if cmp -s "$tmp" "$CROWDSEC_PROFILES_FILE"; then
+  if nsh_cmp "$tmp" "$CROWDSEC_PROFILES_FILE"; then
     rm -f "$tmp"
     echo "Default ban duration is already ${new_duration}."
     return 0
@@ -1011,7 +1021,7 @@ enable_progressive_default()
 
   $SUDO sed 's/^#duration_expr:/duration_expr:/' "$CROWDSEC_PROFILES_FILE" > "$tmp"
 
-  if cmp -s "$tmp" "$CROWDSEC_PROFILES_FILE"; then
+  if nsh_cmp "$tmp" "$CROWDSEC_PROFILES_FILE"; then
     rm -f "$tmp"
     return 1
   fi
@@ -1059,7 +1069,7 @@ show_or_set_progressive()
     $SUDO sed 's/^duration_expr:/#duration_expr:/' "$CROWDSEC_PROFILES_FILE" > "$tmp"
   fi
 
-  if cmp -s "$tmp" "$CROWDSEC_PROFILES_FILE"; then
+  if nsh_cmp "$tmp" "$CROWDSEC_PROFILES_FILE"; then
     rm -f "$tmp"
     echo "Progressive ban is already ${action}."
     return 0
@@ -1098,7 +1108,7 @@ edit_profiles()
 
   $SUDO "$editor" "$CROWDSEC_PROFILES_FILE"
 
-  if $SUDO cmp -s "$pre_edit" "$CROWDSEC_PROFILES_FILE"; then
+  if nsh_cmp "$pre_edit" "$CROWDSEC_PROFILES_FILE" sudo; then
     rm -f "$pre_edit"
     echo "No changes made."
     return 0
@@ -1204,7 +1214,7 @@ set_capi_sharing()
     }
   ' "$CROWDSEC_CONFIG_FILE" > "$tmp"
 
-  if cmp -s "$tmp" "$CROWDSEC_CONFIG_FILE"; then
+  if nsh_cmp "$tmp" "$CROWDSEC_CONFIG_FILE"; then
     rm -f "$tmp"
     return 1
   fi
@@ -1310,7 +1320,7 @@ set_capi_pull()
     }
   ' "$CROWDSEC_CONFIG_FILE" > "$tmp"
 
-  if cmp -s "$tmp" "$CROWDSEC_CONFIG_FILE"; then
+  if nsh_cmp "$tmp" "$CROWDSEC_CONFIG_FILE"; then
     rm -f "$tmp"
     return 1
   fi

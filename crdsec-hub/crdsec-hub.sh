@@ -18,7 +18,7 @@
 # See the License for the specific language governing permissions and     #
 # limitations under the License.                                          #
 #                                                                         #
-# Version 0.9.6                                                           #
+# Version 0.9.7                                                           #
 #                                                                         #
 # Purpose:                                                                #
 #                                                                         #
@@ -45,7 +45,7 @@
 #                                                                         #
 ###########################################################################
 
-CRDSEC_HUB_VERSION="0.9.6"
+CRDSEC_HUB_VERSION="0.9.7"
 
 CONTAINER_NAME="crdsec-hub"
 
@@ -86,6 +86,33 @@ log_err()
 have_command()
 {
   command -v "$1" >/dev/null 2>&1
+}
+
+
+# cmp isn't guaranteed present on a minimal install (it's from diffutils) -
+# fall back to sha256sum, which is.
+nsh_cmp()
+{
+  if [ -z "$1" ] || [ -z "$2" ]; then
+    return 1
+  fi
+
+  if [ ! -e "$1" ] || [ ! -e "$2" ]; then
+    return 1
+  fi
+
+  if have_command cmp; then
+    cmp -s "$1" "$2"
+    return $?
+  fi
+
+  local hash1
+  local hash2
+
+  hash1=$(sha256sum "$1" | cut -d" " -f1)
+  hash2=$(sha256sum "$2" | cut -d" " -f1)
+
+  [ "$hash1" = "$hash2" ]
 }
 
 
@@ -824,7 +851,7 @@ enable_profile_notification()
     { print }
   ' "$profiles_file" > "$tmp"
 
-  if cmp -s "$tmp" "$profiles_file"; then
+  if nsh_cmp "$tmp" "$profiles_file"; then
     rm -f "$tmp"
     return 1
   fi
@@ -967,7 +994,7 @@ show_or_set_duration()
 
   sed "s/^\([[:space:]]*duration: \).*/\1${new_duration}/" "$profiles_file" > "$tmp"
 
-  if cmp -s "$tmp" "$profiles_file"; then
+  if nsh_cmp "$tmp" "$profiles_file"; then
     rm -f "$tmp"
     echo "Default ban duration is already ${new_duration}."
     return 0
@@ -1016,7 +1043,7 @@ show_or_set_progressive()
     sed 's/^duration_expr:/#duration_expr:/' "$profiles_file" > "$tmp"
   fi
 
-  if cmp -s "$tmp" "$profiles_file"; then
+  if nsh_cmp "$tmp" "$profiles_file"; then
     rm -f "$tmp"
     echo "Progressive ban is already ${action}."
     return 0
@@ -1051,7 +1078,7 @@ enable_progressive_default()
 
   sed 's/^#duration_expr:/duration_expr:/' "$profiles_file" > "$tmp"
 
-  if cmp -s "$tmp" "$profiles_file"; then
+  if nsh_cmp "$tmp" "$profiles_file"; then
     rm -f "$tmp"
     return 1
   fi
@@ -1088,7 +1115,7 @@ edit_profiles()
 
   "$editor" "$profiles_file"
 
-  if cmp -s "$pre_edit" "$profiles_file"; then
+  if nsh_cmp "$pre_edit" "$profiles_file"; then
     rm -f "$pre_edit"
     echo "No changes made."
     return 0
@@ -1207,7 +1234,7 @@ set_capi_sharing()
     }
   ' "$config_file" > "$tmp"
 
-  if cmp -s "$tmp" "$config_file"; then
+  if nsh_cmp "$tmp" "$config_file"; then
     rm -f "$tmp"
     return 1
   fi
@@ -1317,7 +1344,7 @@ set_capi_pull()
     }
   ' "$config_file" > "$tmp"
 
-  if cmp -s "$tmp" "$config_file"; then
+  if nsh_cmp "$tmp" "$config_file"; then
     rm -f "$tmp"
     return 1
   fi
@@ -1619,7 +1646,7 @@ configure_otlp()
   local http_changed="yes"
 
   if [ -e "$HTTP_NOTIF_FILE" ]; then
-    if cmp -s "$tmp" "$HTTP_NOTIF_FILE"; then
+    if nsh_cmp "$tmp" "$HTTP_NOTIF_FILE"; then
       echo
       echo "[$HTTP_NOTIF_FILE] unchanged"
       rm -f "$tmp"
