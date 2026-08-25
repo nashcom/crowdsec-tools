@@ -32,6 +32,7 @@ Kept in sync with `crdsectl.sh help` - run that directly if this drifts.
 | `profile`                                         | Open profiles.yaml in $EDITOR (or vi), validate, and restart                  |
 | `capi send\|pull [on\|off]`                       | Show or set CAPI signal sharing / blocklist pulling                          |
 | `capi register`                                   | Opt in to CrowdSec's Central API (off by default)                             |
+| `geoip source [url-prefix]`                       | Show or set geoip-enrich's GeoLite2 mmdb source (or set CRDSECTL_GEOIP_URL)   |
 | `firewall`                                        | Show CrowdSec nftables rules                                                  |
 | `log [lines]`                                     | Show CrowdSec journal (default: 100 lines)                                    |
 | `reload`                                          | Validate and reload CrowdSec                                                  |
@@ -190,6 +191,30 @@ argument shows both as `ip / range` instead of silently only reporting the ip va
 including overriding an explicit `progressive off`, since there's no way to distinguish "still at CrowdSec's stock
 default" from "an admin deliberately turned it off" from the file content alone. If you don't want progressive ban,
 run `crdsectl progressive off` again after any `update`.
+
+## GeoIP data
+
+`geoip-enrich` (a CrowdSec hub item most collections depend on) downloads MaxMind GeoLite2 `.mmdb` files from
+CrowdSec's own CDN (`hub-data.crowdsec.net`) by default. To serve them from your own repository instead:
+
+```bash
+crdsectl geoip source                                  # show the current source_url(s)
+crdsectl geoip source https://mirror.example.com/geoip  # point both City and ASN mmdb at your own mirror
+```
+
+A single prefix is applied to both entries (`<prefix>/GeoLite2-City.mmdb`, `<prefix>/GeoLite2-ASN.mmdb`), matching
+CrowdSec's own `.../mmdb_update/<file>` layout. For unattended deployment, set `CRDSECTL_GEOIP_URL` in the
+environment instead - `update` applies it automatically every run, the same pattern as `DOMINO_OUTPUT_LOG`.
+
+This edits `geoip-enrich.yaml` in place rather than regenerating it, since (unlike the Domino acquisition/parser/
+scenario files) it's hub-installed content crdsectl doesn't own. Verified against CrowdSec's own source
+(`pkg/hubops`): a locally-modified ("tainted") item is skipped by `cscli hub upgrade`/`cscli parsers upgrade`
+unless `--force` is passed, so the override survives normal use - only an explicit `--force` upgrade of that item
+would revert it to CrowdSec's stock URL.
+
+`crdsectl status` includes a "GeoIP data" block showing each `.mmdb`'s local path, size, last-updated time, and
+configured source - read live from `geoip-enrich.yaml` and the data directory, so it reflects whatever source is
+currently set.
 
 ## Files
 

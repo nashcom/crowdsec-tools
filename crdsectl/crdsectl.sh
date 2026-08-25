@@ -18,7 +18,7 @@
 # See the License for the specific language governing permissions and     #
 # limitations under the License.                                          #
 #                                                                         #
-# Version 0.9.7                                                           #
+# Version 0.9.10                                                          #
 #                                                                         #
 # Install, configure and operate CrowdSec as a per-service brute-force /  #
 # auth-failure guard. Manages two components: "crowdsec" (detects,        #
@@ -29,7 +29,7 @@
 #                                                                         #
 ###########################################################################
 
-CRDSECTL_VERSION="0.9.7"
+CRDSECTL_VERSION="0.9.10"
 CRDSECTL_CONFIG_VERSION="1"
 
 CROWDSEC_SERVICE="crowdsec"
@@ -40,6 +40,13 @@ CROWDSEC_PARSER_DIR="/etc/crowdsec/parsers/s01-parse"
 CROWDSEC_SCENARIO_DIR="/etc/crowdsec/scenarios"
 CROWDSEC_PROFILES_FILE="/etc/crowdsec/profiles.yaml"
 CROWDSEC_CONFIG_FILE="/etc/crowdsec/config.yaml"
+
+# Where cscli hub update downloads data: block files (MaxMind GeoLite2 mmdbs
+# etc) to, and where the geoip-enrich hub item lands once installed
+# (confirmed against config/config.yaml and the hub's own symlink naming in
+# crowdsecurity/crowdsec and crowdsecurity/hub on GitHub, not assumed).
+CROWDSEC_DATA_DIR="/var/lib/crowdsec/data"
+CROWDSEC_GEOIP_PARSER="/etc/crowdsec/parsers/s02-enrich/geoip-enrich.yaml"
 
 CRDSECTL_ACQUIS_FILE="${CROWDSEC_ACQUIS_DIR}/domino.yaml"
 CRDSECTL_PARSER_FILE="${CROWDSEC_PARSER_DIR}/domino-auth.yaml"
@@ -1498,6 +1505,124 @@ capi_command()
 }
 
 
+# Reads geoip-enrich.yaml's own "data:" block directly rather than hardcoding
+# the mmdb file names, so status reflects wherever source_url actually points
+# right now (including once it's repointed at our own mirror). Prints
+# "url|dest_file" pairs, one per data: entry, in file order.
+get_geoip_data_entries()
+{
+  [ -e "$CROWDSEC_GEOIP_PARSER" ] || return 1
+
+  awk '
+    /^data:/ { in_data = 1; next }
+    in_data && /^[^[:space:]]/ { in_data = 0 }
+    in_data && /source_url:/ {
+      url = $0
+      sub(/.*source_url:[[:space:]]*/, "", url)
+    }
+    in_data && /dest_file:/ {
+      file = $0
+      sub(/.*dest_file:[[:space:]]*/, "", file)
+      print url "|" file
+    }
+  ' "$CROWDSEC_GEOIP_PARSER"
+}
+
+
+show_or_set_geoip_source()
+{
+  local url_prefix="$1"
+
+  if [ ! -e "$CROWDSEC_GEOIP_PARSER" ]; then
+    log_err "${CROWDSEC_GEOIP_PARSER} not found - geoip-enrich isn't installed."
+    return 1
+  fi
+
+  if [ -z "$url_prefix" ]; then
+    local entries
+    entries=$(get_geoip_data_entries)
+
+    if [ -z "$entries" ]; then
+      echo "GeoIP source: no data: entries found."
+      return 0
+    fi
+
+    local url file
+    while IFS='|' read -r url file; do
+      [ -z "$file" ] && continue
+      printf "%-24s :  %s\n" "$file" "$url"
+    done <<< "$entries"
+    return 0
+  fi
+
+  require_root || return 1
+
+  # A single prefix applied to every data: entry, matching CrowdSec's own
+  # hub-data.crowdsec.net/mmdb_update/<file> layout - not independent URLs
+  # per file, since a mirror would serve all of them from one place anyway.
+  url_prefix="${url_prefix%/}"
+
+  local tmp
+  tmp=$(mktemp) || return 1
+
+  # source_url and dest_file appear in that order per entry (verified
+  # against the real hub file) - the dest_file line is what confirms which
+  # file the buffered source_url line belongs to, so it can't be rewritten
+  # until dest_file is seen.
+  awk -v prefix="$url_prefix" '
+    /^data:/ { in_data = 1; print; next }
+    in_data && /^[^[:space:]]/ { in_data = 0 }
+    in_data && /source_url:/ {
+      pending = $0
+      sub(/source_url:.*/, "", pending)
+      have_pending = 1
+      next
+    }
+    in_data && have_pending && /dest_file:/ {
+      file = $0
+      sub(/.*dest_file:[[:space:]]*/, "", file)
+      print pending "source_url: " prefix "/" file
+      print
+      have_pending = 0
+      next
+    }
+    { print }
+  ' "$CROWDSEC_GEOIP_PARSER" > "$tmp"
+
+  if nsh_cmp "$tmp" "$CROWDSEC_GEOIP_PARSER"; then
+    rm -f "$tmp"
+    echo "GeoIP source is already ${url_prefix}."
+    return 0
+  fi
+
+  local backup="${CROWDSEC_GEOIP_PARSER}.bak"
+  $SUDO cp -a "$CROWDSEC_GEOIP_PARSER" "$backup"
+  $SUDO cp "$tmp" "$CROWDSEC_GEOIP_PARSER"
+  rm -f "$tmp"
+
+  echo "GeoIP source set to ${url_prefix} (backup: ${backup})."
+  echo "Restarting ${CROWDSEC_SERVICE}..."
+  $SUDO systemctl restart "$CROWDSEC_SERVICE"
+}
+
+
+geoip_command()
+{
+  local sub="$1"
+  local action="$2"
+
+  case "$sub" in
+    source)
+      show_or_set_geoip_source "$action"
+      ;;
+    *)
+      log_err "Usage: crdsectl geoip source [<url-prefix>]"
+      return 1
+      ;;
+  esac
+}
+
+
 show_status()
 {
   load_domino_config
@@ -1596,6 +1721,33 @@ show_status()
       || printf "%-24s :  %s\n" "Community blocklist" "disabled"
     [ "$pull_blocklists" = "true" ] && printf "%-24s :  %s\n" "Console blocklists" "enabled" \
       || printf "%-24s :  %s\n" "Console blocklists" "disabled"
+  fi
+
+  echo
+  echo "GeoIP data:"
+
+  local geoip_entries
+  geoip_entries=$(get_geoip_data_entries)
+
+  if [ -z "$geoip_entries" ]; then
+    printf "%-24s :  %s\n" "geoip-enrich" "not installed"
+  else
+    local geoip_url geoip_file geoip_path
+    while IFS='|' read -r geoip_url geoip_file; do
+      [ -z "$geoip_file" ] && continue
+      geoip_path="${CROWDSEC_DATA_DIR}/${geoip_file}"
+
+      if [ -e "$geoip_path" ]; then
+        local geoip_size geoip_mtime
+        geoip_size=$(stat -c '%s' "$geoip_path" 2>/dev/null | numfmt --to=iec --suffix=B 2>/dev/null)
+        geoip_mtime=$(stat -c '%y' "$geoip_path" 2>/dev/null | cut -d'.' -f1)
+        printf "%-24s :  %s (%s, updated %s)\n" "$geoip_file" "$geoip_path" "${geoip_size:-?}" "${geoip_mtime:-?}"
+      else
+        printf "%-24s :  %s\n" "$geoip_file" "missing (${geoip_path})"
+      fi
+
+      printf "%-24s :  %s\n" "  source" "$geoip_url"
+    done <<< "$geoip_entries"
   fi
 
   echo
@@ -2527,6 +2679,7 @@ show_help()
   printf "  %-37s%s\n" "profile" "Open profiles.yaml in \$EDITOR (or vi), validate, and restart"
   printf "  %-37s%s\n" "capi send|pull [on|off]" "Show or set CAPI signal sharing / blocklist pulling"
   printf "  %-37s%s\n" "capi register" "Opt in to CrowdSec's Central API (off by default)"
+  printf "  %-37s%s\n" "geoip source [url-prefix]" "Show or set geoip-enrich's GeoLite2 mmdb source (or set CRDSECTL_GEOIP_URL)"
   printf "  %-37s%s\n" "firewall (nft)" "Show CrowdSec nftables rules"
   printf "  %-37s%s\n" "log [lines]" "Show CrowdSec journal (default: 100 lines)"
   printf "  %-37s%s\n" "reload" "Validate and reload CrowdSec"
@@ -2575,6 +2728,13 @@ main()
       ;;
 
     update)
+      # Deployment-time customization, same pattern as DOMINO_OUTPUT_LOG:
+      # set once in the environment, applied automatically on every update.
+      # Idempotent (show_or_set_geoip_source no-ops if already current).
+      if [ -n "$CRDSECTL_GEOIP_URL" ]; then
+        show_or_set_geoip_source "$CRDSECTL_GEOIP_URL"
+      fi
+
       update_domino_config "$2"
       local rc=$?
 
@@ -2659,6 +2819,10 @@ main()
 
     capi)
       capi_command "$2" "$3"
+      ;;
+
+    geoip)
+      geoip_command "$2" "$3"
       ;;
 
     firewall|nft)
